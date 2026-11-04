@@ -24,7 +24,7 @@ app.use((req,res,next)=>{
 app.use(express.json({limit:'256kb'})); app.get('/',(_req,res)=>res.sendFile(path.resolve('web/index.html')));
 const model='gpt-5.4';
 const maxIterations=Math.min(Number(process.env.MAX_TURNS)||12,25);
-const maxSessionTokens=Math.min(Number(process.env.MAX_SESSION_TOKENS)||20000,100000);
+const maxSessionTokens=Math.min(Number(process.env.MAX_SESSION_TOKENS)||50000,100000);
 const globalBudget=Math.min(Number(process.env.MAX_TOTAL_TOKENS)||100000,500000);
 type Message=Record<string,unknown>;
 type Session={messages:Message[]; tokens:number; originals:Record<string,Record<string,{valor:unknown;confianza:number}>>; pending:Set<string>; history:unknown[]};
@@ -47,7 +47,7 @@ app.post('/api/chat',async(req,res)=>{
  requestCount++; session.messages.push({role:'user',content:message}); session.history.push({role:'user',content:message}); const toolCalls:unknown[]=[]; let reply='Se alcanzó el límite de iteraciones. Continúa en un nuevo turno.'; let needsConfirmation=false;
  const llm:LlmAdapter=new OpenAiAdapter(model,apiKey); const confirms=/^\s*(?:sí[,\s]+)?(?:confirmo|autorizo|apruebo)\b/i.test(message) && !/\bno\s+(?:confirmo|autorizo|apruebo)\b/i.test(message);
  try { for(let i=0;i<maxIterations;i++) {
-   const remaining=Math.min(1000,maxSessionTokens-session.tokens,globalBudget-totalTokens); if(remaining<=0){reply='Se alcanzó el límite de tokens.';break;}
+   const remaining=Math.min(1800,maxSessionTokens-session.tokens,globalBudget-totalTokens); if(remaining<=0){const events=toolCalls as Array<{name:string;args:Record<string,unknown>;result:{ok:boolean;data?:Record<string,unknown>;error?:string}}>;const lines=events.filter(e=>/contratos_(validar|registrar)/.test(e.name)).map(e=>`- ${String(e.args.mensaje_id??'Caso')}: ${e.result.ok?String(e.result.data?.accion??e.result.data?.clasificacion??'consultado'):String(e.result.error??'error')}${Array.isArray(e.result.data?.requiere_revision)&&(e.result.data.requiere_revision as unknown[]).length?` · revisión: ${(e.result.data.requiere_revision as unknown[]).join(', ')}`:''}`);reply='Se alcanzó el límite de uso de la sesión. Estos son los resultados que alcanzaron a verificarse:\n\n'+(lines.join('\n')||'No hay resultados de clasificación todavía.');needsConfirmation=session.pending.size>0;break;}
    const response=await llm.send(session.messages,definitions,remaining); session.tokens+=response.usage; totalTokens+=response.usage; const answer=response.message; session.messages.push(answer as unknown as Message);
    if(!answer.tool_calls?.length){reply=answer.content || 'No hay respuesta disponible.';needsConfirmation=session.pending.size>0;break;}
    for(const call of answer.tool_calls) {

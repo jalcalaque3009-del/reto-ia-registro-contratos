@@ -2,6 +2,8 @@
 
 Prototipo independiente que procesa los seis mensajes ficticios del reto, registra contratos en un maestro CSV simulado y genera alertas. La conversación usa OpenAI y las herramientas deterministas también pueden ejecutarse sin clave.
 
+Demo: https://reto-ia-registro-contratos.vercel.app/ (requiere la contraseña de acceso facilitada por el propietario).
+
 ## Requisitos y ejecución
 
 Node.js 20 o superior y npm. Desde la carpeta raíz:
@@ -41,4 +43,4 @@ Pruebas técnicas: `npm run check`, `npm test` y `npm run demo`.
 
 El repositorio permite importar el proyecto en Vercel como Express. Configura en Vercel las variables de producción `OPENAI_API_KEY` y `ACCESS_PASSWORD` como **Secret**, con una contraseña aleatoria única de al menos 20 caracteres; nunca pongas la clave en el código ni en el navegador. Sin contraseña el servidor alojado no arranca. Comparte la contraseña de acceso solo con la persona evaluadora por un canal seguro; el nombre de usuario de Basic Auth puede ser cualquiera. Vercel sirve HTTPS.
 
-El historial visible se guarda en el almacenamiento de la pestaña y el contexto que devuelve el servidor está cifrado y autenticado antes de almacenarse en la pestaña. El maestro y los archivos generados de la demo se escriben en almacenamiento temporal: una instancia puede reiniciarse o cambiar y perderlos, y las instancias no comparten ese estado. Los contadores de límite también son temporales y pueden reiniciarse o ser distintos entre instancias; fija además un límite de gasto duro en OpenAI. Para producción se requiere persistencia y limitación centralizadas, autenticación por usuario y auditoría de seguridad. El enlace alojado queda sujeto al acceso y configuración de la cuenta de Vercel.
+El historial visible se guarda en el almacenamiento local del navegador y permite abrir varias conversaciones, borrarlas o exportarlas. El texto del historial no está cifrado en ese navegador: no uses datos confidenciales ni dispositivos compartidos y elimina las conversaciones cuando acabes. El contexto que devuelve el servidor está cifrado y autenticado antes de almacenarse en el navegador. El maestro y los archivos generados de la demo se escriben en almacenamiento temporal: una instancia puede reiniciarse o cambiar y perderlos, y las instancias no comparten ese estado. Los contadores de límite también son temporales y pueden reiniciarse o ser distintos entre instancias; fija además un límite de gasto duro en OpenAI. Para producción se requiere persistencia y limitación centralizadas, autenticación por usuario y auditoría de seguridad. El enlace alojado queda sujeto al acceso y configuración de la cuenta de Vercel.
