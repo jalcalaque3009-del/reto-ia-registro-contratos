@@ -17,7 +17,7 @@ npm install
 npm run demo
 ```
 
-La demo limpia `out/` al comenzar, incluso si el servidor usa otro directorio de salida. No la ejecutes desde una carpeta cuyo `out/` necesites conservar. Muestra el bloqueo de `msg-006` y una segunda llamada con fechas de ejemplo introducidas por un revisor simulado: **esas fechas no están en el contrato y no se deben asumir en un caso real**.
+La demo limpia `out/` al comenzar, incluso si el servidor usa otro directorio de salida. No la ejecutes desde una carpeta cuyo `out/` necesites conservar. Muestra el bloqueo de `msg-006` y una segunda llamada con fechas y moneda del valor introducidas como ejemplo por un revisor simulado: **esos datos no están determinados en el contrato y no se deben asumir en un caso real**. La mención de COP en el texto corresponde al umbral de una póliza, no establece la moneda del valor del contrato marco.
 
 Para el chat, crea `.env` a partir de `.env.example` y configura `OPENAI_API_KEY` en ese archivo local. En Windows con PowerShell 7, cifra la clave para tu cuenta de Windows y retírala de `.env` con `pwsh -NoProfile -File scripts/encrypt-key.ps1`. El archivo cifrado `.secrets/openai.dpapi` está excluido de Git y solo lo descifra la misma cuenta de Windows en la misma máquina. En otros servidores, usa el almacén de secretos del proveedor para proporcionar `OPENAI_API_KEY` al proceso. Ejecuta:
 

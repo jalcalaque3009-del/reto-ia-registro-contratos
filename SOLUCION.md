@@ -18,7 +18,7 @@ Se eligió este modelo por preferencia de la persona usuaria y para organizar re
 
 ## Extracción y validación
 
-Se detectan el número, partes, identificación, cláusula de objeto, importe, moneda, plazo, póliza y remitente mediante patrones sobre el texto del adjunto. Los campos presentes reciben confianza 1; los ausentes, 0; el valor por demanda y la póliza condicional reciben 0,5. En `msg-006` el día de firma y las fechas de vigencia no aparecen, por lo que no se inventan. La fecha del correo tampoco prueba la fecha de firma. El modelo organiza y explica los resultados de las herramientas, pero el backend no acepta que altere valores salvo que una persona los indique y confirme explícitamente. Las heurísticas están adaptadas al formato de los fixtures: no son un extractor jurídico universal.
+Se detectan el número, partes, identificación, cláusula de objeto, importe, moneda, plazo, póliza y remitente mediante patrones sobre el texto del adjunto. Los campos presentes reciben confianza 1; los ausentes, 0; el valor por demanda y la póliza condicional reciben 0,5. En `msg-006` el día de firma, las fechas de vigencia y la moneda del valor del contrato no aparecen, por lo que no se inventan. Los COP de la garantía describen el umbral de la póliza, no la moneda de las órdenes; la fecha del correo tampoco prueba la fecha de firma. El modelo organiza y explica los resultados de las herramientas, pero el backend no acepta que altere valores salvo que una persona los indique y confirme explícitamente. Las heurísticas están adaptadas al formato de los fixtures: no son un extractor jurídico universal.
 
 `contratos_leer_fuente` permite consultar el texto original de los adjuntos simulados para responder sobre cláusulas que no forman parte del maestro, sin registrar ni modificar el contrato. Solo admite mensajes y nombres de adjuntos de los fixtures; el prompt trata el texto como evidencia no confiable, no como instrucciones. La lectura completa mejora la explicación, pero no sustituye la validación ni garantiza que el modelo interprete todos los contratos correctamente.
 
@@ -60,7 +60,7 @@ El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en e
 | `msg-003` | Otrosí que actualiza la fila existente y deja historial. |
 | `msg-004` | Duplicado sin segunda fila; el mensaje se marca procesado. |
 | `msg-005` | Cotización sin contrato, rechazada con motivo. |
-| `msg-006` | Valor indeterminado y fechas sin evidencia suficiente: revisión humana antes del registro; remitente desconocido informado. La póliza es condicional por orden de servicio. |
+| `msg-006` | Valor indeterminado; fechas y moneda del valor sin evidencia suficiente: revisión humana antes del registro; remitente desconocido informado. La póliza es condicional por orden de servicio. |
 
 Las pruebas verifican también que el fixture maestro no cambia, que los errores de datos no se aceptan silenciosamente, que se conservan los identificadores y que las alertas excluyen una actualización antigua de la lista de nuevos registros posteriores al corte. La prueba HTTP usa un proveedor simulado para verificar el bloqueo y la confirmación explícita sin consumir créditos. La evaluación del modelo y de la interfaz se hace por separado: una prueba automatizada no demuestra que todas las respuestas futuras sean correctas.
 

@@ -37,7 +37,7 @@ test('procesa los seis casos, conserva el maestro original y exige revisión', a
   const expected:Record<string,string>={'msg-001':'nuevo','msg-002':'nuevo','msg-003':'actualizacion','msg-004':'duplicado','msg-006':'nuevo'};
   for(const [id,classification] of Object.entries(expected)) {
    const e=await execute(extraer,{mensaje_id:id});assert.equal(e.ok,true,id); const v=await execute(validar,{mensaje_id:id,contrato:e.data}); assert.equal(v.data?.clasificacion,classification,id);
-   if(id==='msg-006'){const policy=e.data?.condicion_poliza as {valor:string};assert.match(policy.valor,/COP \$100\.000\.000/);assert.match(policy.valor,/supere/);}
+   if(id==='msg-006'){const policy=e.data?.condicion_poliza as {valor:string};assert.match(policy.valor,/COP \$100\.000\.000/);assert.match(policy.valor,/supere/);const currency=e.data?.moneda as {valor:unknown;confianza:number};assert.equal(currency.valor,null,'La moneda de la garantía no prueba la moneda del contrato');assert.equal(currency.confianza,0);assert.ok((v.data?.requiere_revision as string[]).includes('moneda'));}
    const before=id==='msg-004'?await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8'):undefined;
    const write=await execute(registrar,{mensaje_id:id,contrato:e.data});
    if(before!==undefined)assert.equal(await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8'),before,'Un duplicado no debe cambiar el maestro');
