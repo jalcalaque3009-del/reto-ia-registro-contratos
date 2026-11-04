@@ -12,7 +12,7 @@ El ciclo envía mensajes y definiciones de herramientas, ejecuta las solicitudes
 
 ## Modelo y costo
 
-Se usa `gpt-4o-mini`, configurable con `OPENAI_MODEL`, por su bajo costo y soporte de herramientas; su disponibilidad depende de la cuenta y OpenAI lo marca como obsoleto, por lo que puede requerir sustitución. Referencia: [modelo y tarifas](https://developers.openai.com/api/docs/models/gpt-4o-mini). A USD 0,15 por millón de tokens de entrada y USD 0,60 por millón de salida, un ejemplo de 10.000 de entrada y 1.000 de salida cuesta aproximadamente USD 0,0021; es una estimación, no una medición del caso. Los límites de la aplicación son aproximados y volátiles; el control de gasto efectivo se configura también en el proyecto de OpenAI.
+Se usa exclusivamente `gpt-5.4`, por instrucción de la persona usuaria. Referencia: [modelo y tarifas](https://developers.openai.com/api/docs/models/gpt-5.4). A USD 2,50 por millón de tokens de entrada y USD 15 por millón de salida, un ejemplo de 10.000 de entrada y 1.000 de salida cuesta aproximadamente USD 0,04; es una estimación, no una medición del caso. Los límites de la aplicación son aproximados y volátiles; el control de gasto efectivo se configura también en el proyecto de OpenAI. Los créditos de API elegibles de Pro se aplican a la organización vinculada y son distintos de la cuota de Codex.
 
 ## Extracción y validación
 
@@ -45,7 +45,7 @@ Los identificadores exactos prevalecen; como alternativa se compara NIT y simili
 | HU-5 alertas | Hecho para fixtures | Programación y entrega autorizada |
 | HU-6 errores | Parcial | Cobertura de formatos y recuperación exhaustiva |
 
-El despliegue público y la prueba real del proveedor dependen de acceso a una clave y a una plataforma de alojamiento. El presupuesto y estado de sesión están en memoria y se reinician; para producción hacen falta autenticación, presupuesto persistente, límites globales, auditoría sin datos sensibles y acceso restringido. Los fixtures no representan datos reales.
+El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en el navegador. El maestro y los archivos se guardan en almacenamiento temporal de la instancia y pueden desaparecer al reiniciar; distintas instancias no comparten esos datos. Los contadores de presupuesto están en memoria y se reinician. Para producción hacen falta persistencia, autenticación por usuario, presupuesto centralizado, auditoría sin datos sensibles y acceso restringido. Los fixtures no representan datos reales.
 
 ## Uso de IA
 

@@ -12,7 +12,7 @@ const campo = z.object({ valor: z.union([z.string(), z.number(), z.boolean(), z.
 const contractSchema = z.record(z.string(), campo);
 const idSchema = z.string().regex(/^msg-\d{3}$/).describe('Identificador del mensaje, por ejemplo msg-001');
 const fixture = (c: Context, ...p: string[]) => path.join(c.directory, 'fixtures', 'reto-02', ...p);
-const output = (c: Context, ...p: string[]) => path.join(c.directory, 'out', ...p);
+const output = (c: Context, ...p: string[]) => path.join(process.env.VERCEL ? '/tmp/reto-contratos-out' : path.join(c.directory, 'out'), ...p);
 const readJson = async (p: string) => JSON.parse(await fs.readFile(p, 'utf8')) as unknown;
 const writeJson = (p: string, value: unknown) => fs.writeFile(p, JSON.stringify(value, null, 2), 'utf8');
 const field = (valor: Field['valor'], confianza = valor === null ? 0 : 1): Field => ({ valor, confianza });
