@@ -16,6 +16,7 @@ test('procesa los seis casos, conserva el maestro original y exige revisión', a
   const expected:Record<string,string>={'msg-001':'nuevo','msg-002':'nuevo','msg-003':'actualizacion','msg-004':'duplicado','msg-006':'nuevo'};
   for(const [id,classification] of Object.entries(expected)) {
    const e=await execute(extraer,{mensaje_id:id});assert.equal(e.ok,true,id); const v=await execute(validar,{mensaje_id:id,contrato:e.data}); assert.equal(v.data?.clasificacion,classification,id);
+   if(id==='msg-006'){const policy=e.data?.condicion_poliza as {valor:string};assert.match(policy.valor,/COP \$100\.000\.000/);assert.match(policy.valor,/supere/);}
    const write=await execute(registrar,{mensaje_id:id,contrato:e.data});
    if(id==='msg-006'){assert.equal(write.ok,false);assert.match(write.error??'',/revisión/);const bypass=await execute(registrar,{mensaje_id:id,contrato:e.data,confirmado:true});assert.equal(bypass.ok,false);assert.match(bypass.error??'',/fechas/);} else assert.equal(write.ok,true,id);
   }
@@ -67,5 +68,18 @@ test('no inventa el país cuando la identificación y el texto no lo determinan'
   await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
   const p=path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt');const text=await readFile(p,'utf8');await writeFile(p,text.replace('con domicilio en Quito, Ecuador','con domicilio en ciudad no especificada'));
   const result=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {ok:boolean;data:{pais:{valor:unknown;confianza:number}}};assert.equal(result.ok,true);assert.equal(result.data.pais.valor,null);assert.equal(result.data.pais.confianza,0);
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('no marca como procesado un duplicado con identidad contradictoria sin revisión', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-contratos-'));const ctx={directory,sessionId:'test'};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  const extracted=JSON.parse(await extraer.execute({mensaje_id:'msg-004'},ctx)) as {data:Record<string,{valor:unknown;confianza:number}>};
+  const conflicting=structuredClone(extracted.data);conflicting.nit_cliente.valor='123456789';
+  const validation=JSON.parse(await validar.execute({mensaje_id:'msg-004',contrato:conflicting},ctx)) as {data:{clasificacion:string;requiere_revision:string[]}};
+  assert.equal(validation.data.clasificacion,'duplicado');assert.ok(validation.data.requiere_revision.includes('nit_cliente'));
+  const blocked=JSON.parse(await registrar.execute({mensaje_id:'msg-004',contrato:conflicting},ctx)) as {ok:boolean;error:string};assert.equal(blocked.ok,false);assert.match(blocked.error,/revisión/);
+  const inbox=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(inbox.data.mensajes.some(m=>m.id==='msg-004'));
  } finally {await rm(directory,{recursive:true,force:true});}
 });
