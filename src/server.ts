@@ -6,7 +6,7 @@ import * as contractTools from './tools/contratos.js';
 import { OpenAiAdapter } from './llm/openai.js';
 import type { LlmAdapter } from './llm/adapter.js';
 import { loadApiKey } from './secret.js';
-import { timingSafeEqual,createHash,createCipheriv,createDecipheriv,randomBytes } from 'node:crypto';
+import { timingSafeEqual,hkdfSync,createCipheriv,createDecipheriv,randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 const app=express();
@@ -29,8 +29,9 @@ const globalBudget=Math.min(Number(process.env.MAX_TOTAL_TOKENS)||100000,500000)
 type Message=Record<string,unknown>;
 type Session={messages:Message[]; tokens:number; originals:Record<string,Record<string,{valor:unknown;confianza:number}>>; pending:Set<string>; history:unknown[]};
 const sessions=new Map<string,Session>(); let totalTokens=0; let requestCount=0;
-function seal(s:Session):string { if(!password)throw new Error('Falta contraseña'); const key=createHash('sha256').update(password).digest();const iv=randomBytes(12);const cipher=createCipheriv('aes-256-gcm',key,iv);const plaintext=JSON.stringify({...s,pending:[...s.pending],history:[],expires:Date.now()+72*3600_000});const body=Buffer.concat([cipher.update(plaintext,'utf8'),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64url'); }
-function unseal(token:string):Session {if(!password || token.length>200000)throw new Error('Sesión inválida');const raw=Buffer.from(token,'base64url');const decipher=createDecipheriv('aes-256-gcm',createHash('sha256').update(password).digest(),raw.subarray(0,12));decipher.setAuthTag(raw.subarray(12,28));const decoded=JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)),decipher.final()]).toString('utf8')) as Session&{pending:string[];expires:number};if(decoded.expires<Date.now())throw new Error('Sesión vencida');return {...decoded,pending:new Set(decoded.pending),history:[]};}
+function sessionKey(apiKey:string):Buffer {return Buffer.from(hkdfSync('sha256',apiKey,'reto-contratos-v1','session-encryption',32));}
+function seal(s:Session,apiKey:string):string {const iv=randomBytes(12);const cipher=createCipheriv('aes-256-gcm',sessionKey(apiKey),iv);const plaintext=JSON.stringify({...s,pending:[...s.pending],history:[],expires:Date.now()+72*3600_000});const body=Buffer.concat([cipher.update(plaintext,'utf8'),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64url'); }
+function unseal(token:string,apiKey:string):Session {if(token.length>200000)throw new Error('Sesión inválida');const raw=Buffer.from(token,'base64url');const decipher=createDecipheriv('aes-256-gcm',sessionKey(apiKey),raw.subarray(0,12));decipher.setAuthTag(raw.subarray(12,28));const decoded=JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)),decipher.final()]).toString('utf8')) as Session&{pending:string[];expires:number};if(decoded.expires<Date.now())throw new Error('Sesión vencida');return {...decoded,pending:new Set(decoded.pending),history:[]};}
 const tools=contractTools as Record<string,{description:string;args:z.ZodRawShape;execute:(a:unknown,c:{directory:string;sessionId:string})=>Promise<string>}>;
 const definitions=Object.entries(tools).map(([name,t])=>({type:'function',function:{name:'contratos_'+name,description:t.description,parameters:z.toJSONSchema(z.object(t.args))}}));
 const context={directory:process.cwd(),sessionId:''};
@@ -41,7 +42,7 @@ app.post('/api/chat',async(req,res)=>{
  const schema=z.object({sessionId:z.string().regex(/^[\w-]{1,80}$/),message:z.string().min(1).max(4000),sessionToken:z.string().max(200000).optional()}); const parsed=schema.safeParse(req.body); if(!parsed.success){res.status(400).json({error:'Solicitud inválida'});return;}
  let apiKey:string|undefined; try { apiKey=loadApiKey(); } catch {res.status(503).json({error:'No se pudo abrir la clave cifrada con este usuario de Windows.'});return;} if(!apiKey){res.status(503).json({error:'Configura una clave de OpenAI en el servidor.'});return;}
  if(requestCount>=100 || totalTokens>=globalBudget){res.status(429).json({error:'Se alcanzó el límite global de uso.'});return;}
- const {sessionId,message,sessionToken}=parsed.data; let restored:Session|undefined; if(process.env.VERCEL && sessionToken){try {restored=unseal(sessionToken);}catch{res.status(400).json({error:'La sesión no es válida o ha vencido; inicia otra.'});return;}} const session=restored??sessions.get(sessionId)??{messages:[{role:'system',content:agentPrompt+'\n\n'+knowledge}],tokens:0,originals:{},pending:new Set<string>(),history:[]}; sessions.set(sessionId,session); const pendingBeforeTurn=new Set(session.pending);
+ const {sessionId,message,sessionToken}=parsed.data; let restored:Session|undefined; if(process.env.VERCEL && sessionToken){try {restored=unseal(sessionToken,apiKey);}catch{res.status(400).json({error:'La sesión no es válida o ha vencido; inicia otra.'});return;}} const session=restored??sessions.get(sessionId)??{messages:[{role:'system',content:agentPrompt+'\n\n'+knowledge}],tokens:0,originals:{},pending:new Set<string>(),history:[]}; sessions.set(sessionId,session); const pendingBeforeTurn=new Set(session.pending);
  if(session.tokens>=maxSessionTokens){res.status(429).json({error:'Se alcanzó el límite de tokens de esta sesión.'});return;}
  requestCount++; session.messages.push({role:'user',content:message}); session.history.push({role:'user',content:message}); const toolCalls:unknown[]=[]; let reply='Se alcanzó el límite de iteraciones. Continúa en un nuevo turno.'; let needsConfirmation=false;
  const llm:LlmAdapter=new OpenAiAdapter(model,apiKey); const confirms=/^\s*(?:sí[,\s]+)?(?:confirmo|autorizo|apruebo)\b/i.test(message) && !/\bno\s+(?:confirmo|autorizo|apruebo)\b/i.test(message);
@@ -67,7 +68,7 @@ app.post('/api/chat',async(req,res)=>{
     toolCalls.push({name:call.function.name,args,result:JSON.parse(result)}); session.messages.push({role:'tool',tool_call_id:call.id,content:result});
    }
   }
-  session.history.push({role:'assistant',content:reply,toolCalls,needsConfirmation}); const newSessionToken=process.env.VERCEL?seal(session):undefined;res.json({reply,toolCalls,needsConfirmation,usage:session.tokens,sessionToken:newSessionToken});
+  session.history.push({role:'assistant',content:reply,toolCalls,needsConfirmation}); const newSessionToken=process.env.VERCEL?seal(session,apiKey):undefined;res.json({reply,toolCalls,needsConfirmation,usage:session.tokens,sessionToken:newSessionToken});
  }catch(e){ const err=e instanceof Error?e.message:'Error del proveedor'; const logdir=process.env.VERCEL?'/tmp/reto-contratos-out':'out';await mkdir(logdir,{recursive:true}); await appendFile(path.join(logdir,'errors.log'),new Date().toISOString()+' error de proveedor\n'); res.status(502).json({error:'No se pudo consultar el modelo. Comprueba la clave, conexión y disponibilidad. '+(err.includes('timed out')?'Tiempo de espera agotado.':'')}); }
 });
 if(!process.env.VERCEL)app.listen(Number(process.env.PORT)||3000,host,()=>console.log(`Servidor iniciado en ${host}:${process.env.PORT||3000}`));
