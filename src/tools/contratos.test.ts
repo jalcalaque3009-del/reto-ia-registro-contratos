@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { leer_buzon, extraer, validar, registrar, alertas } from './contratos.js';
 import { parse } from 'csv-parse/sync';
+import { stringify } from 'csv-stringify/sync';
 
 test('procesa los seis casos, conserva el maestro original y exige revisión', async () => {
  const directory=await mkdtemp(path.join(tmpdir(),'reto-contratos-')); const ctx={directory,sessionId:'test'};
@@ -12,19 +13,26 @@ test('procesa los seis casos, conserva el maestro original y exige revisión', a
  try {
   await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
   const original=await readFile(path.join(directory,'fixtures/reto-02/maestro-contratos.csv'),'utf8');
-  const inbox=await execute(leer_buzon,{}); assert.equal(inbox.ok,true); assert.equal((inbox.data?.mensajes as unknown[]).length,6);
+  const inbox=await execute(leer_buzon,{}); assert.equal(inbox.ok,true); const messages=inbox.data?.mensajes as Array<{id:string;tiene_contrato:boolean;clasificacion?:string;motivo?:string}>; assert.equal(messages.length,6);
+  const quote=messages.find(message=>message.id==='msg-005'); assert.equal(quote?.tiene_contrato,false); assert.equal(quote?.clasificacion,'rechazado'); assert.match(quote?.motivo??'',/sin adjunto/i);
   const expected:Record<string,string>={'msg-001':'nuevo','msg-002':'nuevo','msg-003':'actualizacion','msg-004':'duplicado','msg-006':'nuevo'};
   for(const [id,classification] of Object.entries(expected)) {
    const e=await execute(extraer,{mensaje_id:id});assert.equal(e.ok,true,id); const v=await execute(validar,{mensaje_id:id,contrato:e.data}); assert.equal(v.data?.clasificacion,classification,id);
    if(id==='msg-006'){const policy=e.data?.condicion_poliza as {valor:string};assert.match(policy.valor,/COP \$100\.000\.000/);assert.match(policy.valor,/supere/);}
+   const before=id==='msg-004'?await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8'):undefined;
    const write=await execute(registrar,{mensaje_id:id,contrato:e.data});
+   if(before!==undefined)assert.equal(await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8'),before,'Un duplicado no debe cambiar el maestro');
    if(id==='msg-006'){assert.equal(write.ok,false);assert.match(write.error??'',/revisión/);const bypass=await execute(registrar,{mensaje_id:id,contrato:e.data,confirmado:true});assert.equal(bypass.ok,false);assert.match(bypass.error??'',/fechas/);} else assert.equal(write.ok,true,id);
   }
   const report=await execute(alertas,{hoy:'2026-09-03'});assert.equal(report.ok,true);assert.ok((report.data?.vencen as unknown[]).length>0);assert.equal((await execute(alertas,{hoy:'2026-02-31'})).ok,false);
   const afterCut=report.data?.registrados_desde_corte as {id_contrato:string}[];assert.ok(afterCut.some(row=>row.id_contrato==='CT-2026-015'));assert.ok(!afterCut.some(row=>row.id_contrato==='CT-2026-011'));
   assert.equal(await readFile(path.join(directory,'fixtures/reto-02/maestro-contratos.csv'),'utf8'),original);
   const csv=await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8');assert.match(csv,/CT-2026-011.*520000.*2027-11-01/);assert.equal(csv.split('\n').filter(line=>line.startsWith('CT-2026-012,')).length,1);assert.doesNotMatch(csv,/CM-2026-03/);
-  const rows=parse(csv,{columns:true,skip_empty_lines:true}) as {id_contrato:string;fecha_registro:string;fuente:string}[];const amended=rows.find(row=>row.id_contrato==='CT-2026-011');assert.equal(amended?.fecha_registro,'2026-05-05');assert.equal(amended?.fuente,'buzon');
+  const rows=parse(csv,{columns:true,skip_empty_lines:true}) as {id_contrato:string;fecha_registro:string;fuente:string;requiere_poliza:string;estado_poliza:string}[];const amended=rows.find(row=>row.id_contrato==='CT-2026-011');assert.equal(amended?.fecha_registro,'2026-05-05');assert.equal(amended?.fuente,'buzon');
+  assert.equal(rows.find(row=>row.id_contrato==='CT-2026-015')?.estado_poliza,'pendiente');
+  const withoutPolicy=rows.find(row=>row.id_contrato==='CT-2026-016');assert.equal(withoutPolicy?.requiere_poliza,'false');assert.equal(withoutPolicy?.estado_poliza,'no_aplica');
+  const remaining=await execute(leer_buzon,{});assert.deepEqual((remaining.data?.mensajes as Array<{id:string}>).map(m=>m.id),['msg-006']);
+  const entries=(await readFile(path.join(directory,'out/log.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line) as {herramienta:string;ok:boolean});assert.ok(entries.some(entry=>entry.herramienta==='contratos_registrar'&&!entry.ok));assert.ok(entries.some(entry=>entry.herramienta==='contratos_alertas'&&entry.ok));
   const history=(await readFile(path.join(directory,'out/sharepoint/historial.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line) as {mensaje_id:string;fecha_mensaje:string});const amendment=history.find(entry=>entry.mensaje_id==='msg-003');assert.equal(amendment?.fecha_mensaje,'2026-08-22T11:05:00-05:00');
  } finally {await rm(directory,{recursive:true,force:true});}
 });
@@ -81,5 +89,35 @@ test('no marca como procesado un duplicado con identidad contradictoria sin revi
   assert.equal(validation.data.clasificacion,'duplicado');assert.ok(validation.data.requiere_revision.includes('nit_cliente'));
   const blocked=JSON.parse(await registrar.execute({mensaje_id:'msg-004',contrato:conflicting},ctx)) as {ok:boolean;error:string};assert.equal(blocked.ok,false);assert.match(blocked.error,/revisión/);
   const inbox=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(inbox.data.mensajes.some(m=>m.id==='msg-004'));
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('rechaza texto sin partes ni objeto y continúa con los demás mensajes', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-contratos-'));const ctx={directory,sessionId:'test'};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  await writeFile(path.join(directory,'fixtures/reto-02/buzon/msg-001/contrato.txt'),'Texto sin partes ni objeto identificables.');
+  await writeFile(path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt'),'  \n');
+  const inbox=JSON.parse(await leer_buzon.execute({},ctx)) as {ok:boolean;data:{mensajes:Array<{id:string;clasificacion?:string;motivo?:string}>}};
+  assert.equal(inbox.ok,true);const invalid=inbox.data.mensajes.find(m=>m.id==='msg-001');assert.equal(invalid?.clasificacion,'rechazado');assert.match(invalid?.motivo??'',/partes y objeto/i);
+  const empty=inbox.data.mensajes.find(m=>m.id==='msg-002');assert.equal(empty?.clasificacion,undefined);
+  const extractedEmpty=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {ok:boolean;error:string};assert.equal(extractedEmpty.ok,false);assert.match(extractedEmpty.error,/vacío/i);
+  const next=JSON.parse(await extraer.execute({mensaje_id:'msg-003'},ctx)) as {ok:boolean};assert.equal(next.ok,true);
+  const after=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(!after.data.mensajes.some(m=>m.id==='msg-001'));assert.ok(after.data.mensajes.some(m=>m.id==='msg-002'));
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('alertas incluyen los días 0 y 60, excluyen el 61 y separan pólizas vigentes', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-alertas-'));const ctx={directory,sessionId:'test'};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  const master=path.join(directory,'fixtures/reto-02/maestro-contratos.csv');
+  const rows=parse(await readFile(master,'utf8'),{columns:true,skip_empty_lines:true,bom:true}) as Array<Record<string,string>>;
+  const add=(id:string,date:string,requires:string,state:string)=>rows.push({...rows[0],id_contrato:id,fecha_fin:date,requiere_poliza:requires,estado_poliza:state});
+  add('TEST-0','2026-09-03','true','pendiente');add('TEST-60','2026-11-02','true','vigente');add('TEST-61','2026-11-03','true','vencida');add('TEST-EXPIRED','2026-09-02','false','no_aplica');
+  await writeFile(master,stringify(rows,{header:true}));
+  const report=JSON.parse(await alertas.execute({hoy:'2026-09-03'},ctx)) as {ok:boolean;data:{vencen:Array<{id_contrato:string}>;polizas_pendientes:Array<{id_contrato:string}>}};
+  assert.equal(report.ok,true);const expiring=report.data.vencen.map(r=>r.id_contrato);assert.ok(expiring.includes('TEST-0'));assert.ok(expiring.includes('TEST-60'));assert.ok(!expiring.includes('TEST-61'));assert.ok(!expiring.includes('TEST-EXPIRED'));
+  const policy=report.data.polizas_pendientes.map(r=>r.id_contrato);assert.ok(policy.includes('TEST-0'));assert.ok(policy.includes('TEST-61'));assert.ok(!policy.includes('TEST-60'));assert.ok(!policy.includes('TEST-EXPIRED'));
  } finally {await rm(directory,{recursive:true,force:true});}
 });

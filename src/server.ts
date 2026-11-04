@@ -18,6 +18,11 @@ if((process.env.VERCEL || !['127.0.0.1','localhost','::1'].includes(host)) && (!
 const attempts=new Map<string,{count:number;until:number}>();
 app.use((req,res,next)=>{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Cache-Control','no-store');
+ // The app has no external scripts, styles, images or frames. Restrict resource
+ // loading and cross-origin embedding while permitting its bundled inline UI.
+ res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+ res.setHeader('Cross-Origin-Resource-Policy','same-origin');
+ res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');
  const ip=req.socket.remoteAddress??'unknown';const now=Date.now();let limit=attempts.get(ip);if(!limit||limit.until<now){limit={count:0,until:now+15*60*1000};attempts.set(ip,limit);}limit.count++;if(limit.count>120){res.status(429).send('Demasiadas solicitudes');return;}
  if(password){const auth=req.headers.authorization??'';let supplied='';if(auth.startsWith('Basic ')){try{supplied=Buffer.from(auth.slice(6),'base64').toString('utf8').split(':').slice(1).join(':');}catch{/* reject */}}const actual=Buffer.from(supplied);const expected=Buffer.from(password);if(actual.length!==expected.length||!timingSafeEqual(actual,expected)){res.setHeader('WWW-Authenticate','Basic realm="Contratos", charset="UTF-8"');res.status(401).send('Acceso restringido');return;}}
  if(req.method==='POST' && req.headers.origin){let origin:URL;try{origin=new URL(req.headers.origin);}catch{res.status(403).send('Origen inválido');return;}if(origin.host!==req.headers.host){res.status(403).send('Origen no autorizado');return;}}

@@ -84,7 +84,24 @@ async function validate(c: Context, id: string, contract: Contract) {
 }
 function similarity(a:string,b:string) { const x=slug(a), y=slug(b); if (!x||!y) return 0; let prev=Array.from({length:y.length+1},(_,i)=>i); for(let i=1;i<=x.length;i++){const next=[i]; for(let j=1;j<=y.length;j++)next[j]=Math.min(next[j-1]+1,prev[j]+1,prev[j-1]+(x[i-1]===y[j-1]?0:1));prev=next;} return 1-prev[y.length]/Math.max(x.length,y.length); }
 
-export const leer_buzon = tool('contratos_leer_buzon','Lista mensajes pendientes y clasifica los que no tienen contrato.',{},async (_,c) => { await init(c); const seen = await processed(c); const ids = (await fs.readdir(fixture(c,'buzon'))).sort(); const mensajes=[]; for(const id of ids) { if(seen[id]) continue; const m=await email(c,id); const tiene_contrato=m.adjuntos.some(a=>/^(contrato|otrosi)\.txt$/i.test(a)); mensajes.push({...m,tiene_contrato,...(!tiene_contrato?{clasificacion:'rechazado',motivo:'Sin adjunto de contrato'}:{})}); if(!tiene_contrato) await mark(c,id,'rechazado'); } return {mensajes}; });
+export const leer_buzon = tool('contratos_leer_buzon','Lista mensajes pendientes y clasifica los que no tienen contrato.',{},async (_,c) => {
+ await init(c); const seen = await processed(c); const ids = (await fs.readdir(fixture(c,'buzon'))).sort(); const mensajes=[];
+ for(const id of ids) {
+  if(seen[id]) continue;
+  const m=await email(c,id); const tiene_contrato=m.adjuntos.some(a=>/^(contrato|otrosi)\.txt$/i.test(a));
+  let motivo = tiene_contrato ? '' : 'Sin adjunto de contrato';
+  if(tiene_contrato){
+   try { await extract(c,id); } catch(error) {
+    // Only the explicit missing-parties/object finding is a rejection. Other
+    // extraction failures stay pending so they can be reported and retried.
+    if(error instanceof Error && error.message==='No se identificaron partes y objeto del contrato') motivo=error.message;
+   }
+  }
+  mensajes.push({...m,tiene_contrato,...(motivo?{clasificacion:'rechazado',motivo}:{})});
+  if(motivo) await mark(c,id,'rechazado');
+ }
+ return {mensajes};
+});
 export const extraer = tool('contratos_extraer','Extrae campos y confianza del texto de un contrato.',{mensaje_id:idSchema},async (a,c)=>extract(c,a.mensaje_id));
 export const validar = tool('contratos_validar','Clasifica el contrato y señala campos que requieren revisión.',{mensaje_id:idSchema,contrato:contractSchema.describe('Campos extraídos con su nivel de confianza')},async(a,c)=>validate(c,a.mensaje_id,a.contrato));
 export const registrar = tool('contratos_registrar','Registra o actualiza el contrato después de la revisión necesaria.',{mensaje_id:idSchema,contrato:contractSchema.describe('Contrato validado'),confirmado:z.boolean().optional().describe('Confirmación humana explícita')},async(a,c)=>{

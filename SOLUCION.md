@@ -14,6 +14,8 @@ El ciclo envía mensajes y definiciones de herramientas, ejecuta las solicitudes
 
 Se usa exclusivamente `gpt-5.4`, por instrucción de la persona usuaria. Referencia: [modelo y tarifas](https://developers.openai.com/api/docs/models/gpt-5.4). A USD 2,50 por millón de tokens de entrada y USD 15 por millón de salida, un ejemplo de 10.000 de entrada y 1.000 de salida cuesta aproximadamente USD 0,04; es una estimación, no una medición del caso. Los límites de la aplicación son aproximados y volátiles; el control de gasto efectivo se configura también en el proyecto de OpenAI. Los créditos de API elegibles de Pro se aplican a la organización vinculada y son distintos de la cuota de Codex.
 
+Se eligió este modelo por preferencia de la persona usuaria y para organizar respuestas y llamadas a herramientas; la extracción y las validaciones críticas permanecen fuera del modelo. Las dependencias principales son Express para HTTP, OpenAI para el proveedor, Zod para validar argumentos, y `csv-parse`/`csv-stringify` para leer y escribir el maestro sin manipular CSV a mano. TypeScript y `tsx` permiten comprobar tipos y ejecutar las pruebas y la demo.
+
 ## Extracción y validación
 
 Se detectan el número, partes, identificación, cláusula de objeto, importe, moneda, plazo, póliza y remitente mediante patrones sobre el texto del adjunto. Los campos presentes reciben confianza 1; los ausentes, 0; el valor por demanda y la póliza condicional reciben 0,5. En `msg-006` el día de firma y las fechas de vigencia no aparecen, por lo que no se inventan. La fecha del correo tampoco prueba la fecha de firma. El modelo organiza y explica los resultados de las herramientas, pero el backend no acepta que altere valores salvo que una persona los indique y confirme explícitamente. Las heurísticas están adaptadas al formato de los fixtures: no son un extractor jurídico universal.
@@ -46,6 +48,19 @@ Los identificadores exactos prevalecen; como alternativa se compara NIT y simili
 | HU-6 errores | Parcial | Cobertura de formatos y recuperación exhaustiva |
 
 El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en el navegador. El maestro y los archivos se guardan en almacenamiento temporal de la instancia y pueden desaparecer al reiniciar; distintas instancias no comparten esos datos. Los contadores de presupuesto están en memoria y se reinician. Para producción hacen falta persistencia, autenticación por usuario, presupuesto centralizado, auditoría sin datos sensibles y acceso restringido. Los fixtures no representan datos reales.
+
+## Casos principales de aceptación
+
+| Mensaje | Comportamiento comprobado |
+|---|---|
+| `msg-001` | Contrato nuevo con póliza pendiente. |
+| `msg-002` | Contrato nuevo sin póliza. |
+| `msg-003` | Otrosí que actualiza la fila existente y deja historial. |
+| `msg-004` | Duplicado sin segunda fila; el mensaje se marca procesado. |
+| `msg-005` | Cotización sin contrato, rechazada con motivo. |
+| `msg-006` | Valor indeterminado y fechas sin evidencia suficiente: revisión humana antes del registro; remitente desconocido informado. La póliza es condicional por orden de servicio. |
+
+Las pruebas verifican también que el fixture maestro no cambia, que los errores de datos no se aceptan silenciosamente, que se conservan los identificadores y que las alertas excluyen una actualización antigua de la lista de nuevos registros posteriores al corte. La prueba HTTP usa un proveedor simulado para verificar el bloqueo y la confirmación explícita sin consumir créditos. La evaluación del modelo y de la interfaz se hace por separado: una prueba automatizada no demuestra que todas las respuestas futuras sean correctas.
 
 ## Uso de IA
 
