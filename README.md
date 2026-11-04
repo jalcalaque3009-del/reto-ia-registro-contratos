@@ -17,7 +17,7 @@ npm install
 npm run demo
 ```
 
-La demo limpia `out/` al comenzar. Muestra el bloqueo de `msg-006` y una segunda llamada con fechas de ejemplo introducidas por un revisor simulado: **esas fechas no están en el contrato y no se deben asumir en un caso real**.
+La demo limpia `out/` al comenzar, incluso si el servidor usa otro directorio de salida. No la ejecutes desde una carpeta cuyo `out/` necesites conservar. Muestra el bloqueo de `msg-006` y una segunda llamada con fechas de ejemplo introducidas por un revisor simulado: **esas fechas no están en el contrato y no se deben asumir en un caso real**.
 
 Para el chat, crea `.env` a partir de `.env.example` y configura `OPENAI_API_KEY` en ese archivo local. En Windows con PowerShell 7, cifra la clave para tu cuenta de Windows y retírala de `.env` con `pwsh -NoProfile -File scripts/encrypt-key.ps1`. El archivo cifrado `.secrets/openai.dpapi` está excluido de Git y solo lo descifra la misma cuenta de Windows en la misma máquina. En otros servidores, usa el almacén de secretos del proveedor para proporcionar `OPENAI_API_KEY` al proceso. Ejecuta:
 
@@ -31,7 +31,7 @@ El servidor escucha solo en localhost por defecto. Para uso por red hay que defi
 
 ## API
 
-`GET /api/health` devuelve proveedor y modelo; `GET /api/sessions/:id` devuelve el historial en memoria; `POST /api/chat` recibe `{ "sessionId": "una-sesion", "message": "..." }` y responde con `reply`, `toolCalls`, `needsConfirmation` y uso acumulado. La sesión se pierde al reiniciar. Las herramientas escriben en `out/log.jsonl`; el maestro original en `fixtures/` nunca se modifica.
+`GET /api/health` devuelve proveedor y modelo; `GET /api/sessions/:id` devuelve solo el historial que conserva la instancia en memoria; `POST /api/chat` recibe `{ "sessionId": "una-sesion", "message": "..." }` y responde con `reply`, `toolCalls`, `needsConfirmation` y uso acumulado. En local, el contexto del servidor se pierde al reiniciar. En Vercel, el navegador devuelve un `sessionToken` cifrado con los turnos para restaurar el contexto entre peticiones; el historial visible permanece en ese navegador, pero el endpoint GET no garantiza recuperarlo entre instancias. Las herramientas escriben en `out/log.jsonl` en local; el maestro original en `fixtures/` nunca se modifica.
 
 El procesamiento se limita con `MAX_TURNS`, `MAX_SESSION_TOKENS`, `MAX_TOTAL_TOKENS` y un máximo de 100 turnos por proceso. Estos topes en memoria se reinician al reiniciar el servidor, pueden excederse en peticiones concurrentes y no sustituyen un límite de gasto configurado en OpenAI. El control de gasto puede superar levemente el límite por latencia de aplicación. No expongas este prototipo sin autenticación y límites de servidor adecuados. El modelo está fijado a `gpt-5.4`.
 

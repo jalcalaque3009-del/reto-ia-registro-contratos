@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { confirmedChangesError, isExplicitConfirmation, type ConfirmedContract } from './confirmation.js';
+import { confirmedChangesError, confirmedReviewError, isExplicitConfirmation, type ConfirmedContract } from './confirmation.js';
 
 const original: ConfirmedContract = {
   valor: { valor: 0, confianza: 0.5 },
@@ -49,4 +49,14 @@ test('rejects invalid dates, confidence tampering, and missing fields', () => {
   assert.match(confirmedChangesError('Confirmo valor 0', original, confidence) ?? '', /confianza/);
   const {valor: _removed, ...incomplete}=original;
   assert.match(confirmedChangesError('Confirmo todo', original, incomplete) ?? '', /completo/);
+});
+
+test('reviewed fields require explicit values even when unchanged', () => {
+ const contract:ConfirmedContract={valor:{valor:0,confianza:.5},valor_indeterminado:{valor:true,confianza:1},requiere_poliza:{valor:false,confianza:.5},estado_poliza:{valor:'no_aplica',confianza:.5}};
+ const fields=['valor','requiere_poliza','estado_poliza'];
+ assert.match(confirmedReviewError('Confirmo todo',fields,contract)??'',/valor.*requiere_poliza.*estado_poliza/);
+ assert.equal(confirmedReviewError('Confirmo valor: indeterminado, requiere póliza: no, estado póliza: no aplica',fields,contract),null);
+ assert.equal(confirmedReviewError('Confirmo valor: 0, requiere póliza: false, estado póliza: no_aplica',fields,contract),null);
+ const unknown:ConfirmedContract={fecha_fin:{valor:null,confianza:0}};
+ assert.match(confirmedReviewError('Confirmo fecha fin: desconocida',['fecha_fin'],unknown)??'',/fecha_fin/);
 });

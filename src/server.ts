@@ -7,7 +7,7 @@ import { OpenAiAdapter } from './llm/openai.js';
 import type { LlmAdapter } from './llm/adapter.js';
 import { loadApiKey } from './secret.js';
 import { outputDirectory } from './paths.js';
-import { isExplicitConfirmation, confirmedChangesError } from './confirmation.js';
+import { isExplicitConfirmation, confirmedChangesError, confirmedReviewError } from './confirmation.js';
 import { timingSafeEqual,hkdfSync,createCipheriv,createDecipheriv,randomBytes } from 'node:crypto';
 import path from 'node:path';
 
@@ -34,7 +34,7 @@ const maxIterations=Math.min(Number(process.env.MAX_TURNS)||12,25);
 const maxSessionTokens=Math.min(Number(process.env.MAX_SESSION_TOKENS)||50000,100000);
 const globalBudget=Math.min(Number(process.env.MAX_TOTAL_TOKENS)||100000,500000);
 type Message=Record<string,unknown>;
-type Session={messages:Message[]; tokens:number; originals:Record<string,Record<string,{valor:unknown;confianza:number}>>; pending:Set<string>; history:unknown[]};
+type Session={messages:Message[]; tokens:number; originals:Record<string,Record<string,{valor:unknown;confianza:number}>>; pending:Set<string>; reviews?:Record<string,string[]>; history:unknown[]};
 const sessions=new Map<string,Session>(); let totalTokens=0; let requestCount=0;
 function sessionKey(apiKey:string):Buffer {return Buffer.from(hkdfSync('sha256',apiKey,'reto-contratos-v1','session-encryption',32));}
 function seal(s:Session,apiKey:string):string {const iv=randomBytes(12);const cipher=createCipheriv('aes-256-gcm',sessionKey(apiKey),iv);const plaintext=JSON.stringify({...s,pending:[...s.pending],history:[],expires:Date.now()+72*3600_000});const body=Buffer.concat([cipher.update(plaintext,'utf8'),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64url'); }
@@ -56,6 +56,7 @@ app.post('/api/chat',async(req,res)=>{
  let apiKey:string|undefined; try { apiKey=loadApiKey(); } catch {res.status(503).json({error:'No se pudo abrir la clave cifrada con este usuario de Windows.'});return;} if(!apiKey){res.status(503).json({error:'Configura una clave de OpenAI en el servidor.'});return;}
  if(requestCount>=100 || totalTokens>=globalBudget){res.status(429).json({error:'Se alcanzó el límite global de uso.'});return;}
  const {sessionId,message,sessionToken}=parsed.data; let restored:Session|undefined; if(process.env.VERCEL && sessionToken){try {restored=unseal(sessionToken,apiKey);}catch{res.status(400).json({error:'La sesión no es válida o ha vencido; inicia otra.'});return;}} const session=restored??sessions.get(sessionId)??{messages:[{role:'system',content:agentPrompt+'\n\n'+knowledge}],tokens:0,originals:{},pending:new Set<string>(),history:[]};
+ session.reviews ??= {};
  // Existing encrypted conversations retain their turns but receive the current instructions after deployment.
  session.messages[0]={role:'system',content:agentPrompt+'\n\n'+knowledge};
  sessions.set(sessionId,session); const pendingBeforeTurn=new Set(session.pending);
@@ -75,17 +76,23 @@ app.post('/api/chat',async(req,res)=>{
         const hasChanges=Object.keys(original).some(k=>JSON.stringify(original[k].valor)!==JSON.stringify(proposed[k].valor));
         if(hasChanges && (!confirms || !pendingBeforeTurn.has(id) || (name==='registrar' && args.confirmado!==true)))throw new Error('Los cambios requieren confirmación humana explícita en un turno posterior.');
         if(name==='registrar' && args.confirmado===true && (!confirms || !pendingBeforeTurn.has(id)))throw new Error('Se requiere confirmación humana explícita en un turno posterior.');
+        if(name==='registrar' && args.confirmado===true) { const review=session.reviews?.[id]; if(!review)throw new Error('Vuelve a validar el contrato antes de confirmar sus campos.'); const reviewError=confirmedReviewError(message,review,proposed); if(reviewError)throw new Error(reviewError); }
         if(name==='registrar' && proposed.otrosi?.valor!==true && ['fecha_inicio','fecha_fin'].some(k=>!proposed[k]?.valor))throw new Error('Faltan fechas: pide a la persona los valores antes de registrar.');
       }
       result=await tool.execute(args,{...context,sessionId}); const data=JSON.parse(result) as {ok:boolean;data?:Record<string,unknown>};
       if(name==='extraer'&&data.ok&&data.data)session.originals[id]=data.data as Record<string,{valor:unknown;confianza:number}>;
-      if(name==='validar'&&data.ok&&Array.isArray(data.data?.requiere_revision)&&(data.data.requiere_revision as unknown[]).length){session.pending.add(id);needsConfirmation=true;}
+      if(name==='validar'&&data.ok&&Array.isArray(data.data?.requiere_revision)&&(data.data.requiere_revision as unknown[]).length){session.reviews[id]=(data.data.requiere_revision as unknown[]).filter((k): k is string=>typeof k==='string');session.pending.add(id);needsConfirmation=true;}
       if(name==='alertas'&&data.ok){alertDate=String(args.hoy);alertsStale=false;}
-      if(name==='registrar'&&data.ok){session.pending.delete(id);if(alertDate && data.data?.accion!=='duplicado')alertsStale=true;}
-    } catch(e){result=JSON.stringify({ok:false,error:e instanceof Error?e.message:'Error de herramienta'});}
+      if(name==='registrar'&&data.ok){session.pending.delete(id);delete session.reviews[id];if(alertDate && data.data?.accion!=='duplicado')alertsStale=true;}
+    } catch(e){result=JSON.stringify({ok:false,error:e instanceof Error?e.message:'Error de herramienta'});try{const dir=outputDirectory(process.cwd());await mkdir(dir,{recursive:true});await appendFile(path.join(dir,'log.jsonl'),JSON.stringify({ts:new Date().toISOString(),herramienta:tool?'contratos_'+name:'herramienta_desconocida',mensaje_id:/^msg-\d{3}$/.test(String(args.mensaje_id??''))?args.mensaje_id:'',ok:false,resumen:'precondición o argumentos inválidos'})+'\n');}catch{/* no ocultar el error principal */}}
     toolCalls.push({name:call.function.name,args,result:JSON.parse(result)}); session.messages.push({role:'tool',tool_call_id:call.id,content:result});
    }
    if(alertsStale && alertDate){session.messages.push({role:'system',content:`El maestro cambió después del reporte de alertas. El reporte anterior está desactualizado. Llama de nuevo a contratos_alertas con hoy=${alertDate} antes de resumir alertas.`});alertsStale=false;}
+  }
+  if(reply==='Se alcanzó el límite de iteraciones. Continúa en un nuevo turno.'){
+   const events=toolCalls as Array<{name:string;args:Record<string,unknown>;result:{ok:boolean;data?:Record<string,unknown>;error?:string}}>;
+   const lines=events.filter(e=>/contratos_(validar|registrar)/.test(e.name)).map(e=>`- ${String(e.args.mensaje_id??'Caso')}: ${e.result.ok?String(e.result.data?.accion??e.result.data?.clasificacion??'consultado'):String(e.result.error??'error')}${Array.isArray(e.result.data?.requiere_revision)&&(e.result.data.requiere_revision as unknown[]).length?` · revisión: ${(e.result.data.requiere_revision as unknown[]).join(', ')}`:''}`);
+   reply='Se alcanzó el límite de pasos de este turno; el proceso puede estar incompleto.\n\n'+(lines.length?'Resultados verificados hasta ahora:\n'+lines.join('\n'):'No se verificaron clasificaciones o registros en este turno.')+'\n\nPide continuar para comprobar los casos y alertas que falten.';needsConfirmation=session.pending.size>0;
   }
   session.history.push({role:'assistant',content:reply,toolCalls,needsConfirmation}); const newSessionToken=process.env.VERCEL?seal(session,apiKey):undefined;res.json({reply,toolCalls,needsConfirmation,usage:session.tokens,sessionToken:newSessionToken});
  }catch(e){ const err=e instanceof Error?e.message:'Error del proveedor'; const logdir=outputDirectory(process.cwd());await mkdir(logdir,{recursive:true}); await appendFile(path.join(logdir,'errors.log'),new Date().toISOString()+' error de proveedor\n'); res.status(502).json({error:'No se pudo consultar el modelo. Comprueba la clave, conexión y disponibilidad. '+(err.includes('timed out')?'Tiempo de espera agotado.':'')}); }

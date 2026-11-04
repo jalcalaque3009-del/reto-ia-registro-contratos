@@ -19,7 +19,7 @@ test('el servidor exige confirmación real y limita las descargas', {timeout:300
   let message:Record<string,unknown>;const tool=(name:string,args:unknown)=>({role:'assistant',content:null,tool_calls:[{id:`call-${calls}`,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
   if(calls===1)message=tool('contratos_extraer',{mensaje_id:'msg-006'});
   else if(calls===2){const result=JSON.parse(payload.messages.at(-1)?.content??'{}') as {data:Contract};original=result.data;message=tool('contratos_validar',{mensaje_id:'msg-006',contrato:original});}
-  else if(calls===4||calls===6){if(!original)throw Error('Missing original contract');const candidate=structuredClone(original);candidate.fecha_inicio.valor='2026-08-31';candidate.fecha_fin.valor='2027-08-31';message=tool('contratos_registrar',{mensaje_id:'msg-006',contrato:candidate,confirmado:true});}
+  else if(calls===4||calls===6||calls===8){if(!original)throw Error('Missing original contract');const candidate=structuredClone(original);candidate.fecha_inicio.valor='2026-08-31';candidate.fecha_fin.valor='2027-08-31';message=tool('contratos_registrar',{mensaje_id:'msg-006',contrato:candidate,confirmado:true});}
   else message={role:'assistant',content:'Respuesta de prueba'};
   res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({id:'chatcmpl-test',object:'chat.completion',created:1,model:'gpt-5.4',choices:[{index:0,message,finish_reason:message.tool_calls?'tool_calls':'stop'}],usage:{prompt_tokens:20,completion_tokens:10,total_tokens:30}}));
  });
@@ -34,7 +34,8 @@ test('el servidor exige confirmación real y limita las descargas', {timeout:300
   const first=await post('Revisa el contrato msg-006');assert.equal(first.needsConfirmation,true);assert.equal(first.toolCalls.length,2);
   const denied=await post('Confirmo que no se registre el contrato con fecha inicio 2026-08-31 y fecha fin 2027-08-31');assert.equal(denied.toolCalls[0].result.ok,false);assert.match(denied.toolCalls[0].result.error??'',/confirmación/i);
   const csvBefore=await readFile(path.join(output,'sharepoint','maestro-contratos.csv'),'utf8');assert.doesNotMatch(csvBefore,/CM-2026-03/);
-  const accepted=await post('Confirmo fecha inicio: 2026-08-31, fecha fin: 2027-08-31');assert.equal(accepted.toolCalls[0].result.ok,true);assert.equal(accepted.needsConfirmation,false);
+  const partial=await post('Confirmo fecha inicio: 2026-08-31, fecha fin: 2027-08-31');assert.equal(partial.toolCalls[0].result.ok,false);assert.match(partial.toolCalls[0].result.error??'',/valor.*requiere_poliza.*estado_poliza/);assert.equal(partial.needsConfirmation,true);
+  const accepted=await post('Confirmo valor: indeterminado, fecha inicio: 2026-08-31, fecha fin: 2027-08-31, requiere poliza: sí, estado poliza: pendiente');assert.equal(accepted.toolCalls[0].result.ok,true);assert.equal(accepted.needsConfirmation,false);
   const csvAfter=await readFile(path.join(output,'sharepoint','maestro-contratos.csv'),'utf8');assert.match(csvAfter,/CM-2026-03/);
   assert.equal((await fetch(url+'/api/artifacts/maestro-contratos.csv')).status,401);
   assert.equal((await fetch(url+'/api/artifacts/maestro-contratos.csv',{headers:{Authorization:auth}})).status,200);

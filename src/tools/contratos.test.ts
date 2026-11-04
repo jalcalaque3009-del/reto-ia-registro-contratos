@@ -73,6 +73,52 @@ test('rechaza fechas, moneda y país inválidos antes de escribir', async () => 
  } finally {await rm(directory,{recursive:true,force:true});}
 });
 
+test('los campos ausentes se conservan desconocidos y exigen revisión, sin rechazar todo el contrato', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-parcial-'));const ctx={directory,sessionId:'test'};
+ const run=async(t:{execute:(a:unknown,c:typeof ctx)=>Promise<string>},a:unknown)=>JSON.parse(await t.execute(a,ctx)) as {ok:boolean;data?:Record<string,unknown>;error?:string};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  const file=path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt');const original=await readFile(file,'utf8');
+  for(const [changed,missing] of [
+   [original.replace('PRIMERA. OBJETO.','PRIMERA. ALCANCE.'),['objeto']],
+   [original.replace('identificada con RUC 1790012345001','identificada con REGISTRO 1790012345001'),['cliente','nit_cliente','pais']],
+   [original.replace('SEGUNDA. VALOR.','SEGUNDA. PRECIO.'),['valor','moneda']],
+  ] as Array<[string,string[]]>) {
+   assert.notEqual(changed,original);await writeFile(file,changed);
+   const e=await run(extraer,{mensaje_id:'msg-002'});assert.equal(e.ok,true,e.error??'extracción fallida');
+   for(const key of missing){const field=e.data?.[key] as {valor:unknown;confianza:number};assert.equal(field.valor,null,key);assert.equal(field.confianza,0,key);}
+   const v=await run(validar,{mensaje_id:'msg-002',contrato:e.data});assert.equal(v.ok,true);assert.equal(v.data?.clasificacion,'nuevo');
+   for(const key of missing)assert.ok((v.data?.requiere_revision as string[]).includes(key),key);
+   const write=await run(registrar,{mensaje_id:'msg-002',contrato:e.data});assert.equal(write.ok,false);assert.match(write.error??'',/revisión/);
+   const inbox=await run(leer_buzon,{});const mail=(inbox.data?.mensajes as Array<{id:string;clasificacion?:string}>).find(m=>m.id==='msg-002');assert.ok(mail);assert.notEqual(mail.clasificacion,'rechazado');
+  }
+  await writeFile(file,original.replace('USD 120,000.00','XYZ 120,000.00'));const invalid=await run(extraer,{mensaje_id:'msg-002'});assert.equal(invalid.ok,false);assert.match(invalid.error??'',/Moneda desconocida/);
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('una sola fecha se interpreta por su etiqueta y no se inventa la otra', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-fecha-parcial-'));const ctx={directory,sessionId:'test'};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  const p=path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt');const original=await readFile(p,'utf8');
+  const range='desde el quince (15) de agosto de 2026 hasta el catorce (14) de agosto de 2027';assert.ok(original.includes(range));
+  for(const [replacement,start,end] of [['hasta el catorce (14) de agosto de 2027',null,'2027-08-14'],['desde el quince (15) de agosto de 2026','2026-08-15',null],['con fecha el quince (15) de agosto de 2026',null,null]] as const){
+   await writeFile(p,original.replace(range,replacement));const e=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {ok:boolean;data:{fecha_inicio:{valor:unknown};fecha_fin:{valor:unknown}}};assert.equal(e.ok,true);assert.equal(e.data.fecha_inicio.valor,start);assert.equal(e.data.fecha_fin.valor,end);
+  }
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('genera un identificador permitido por el PRD cuando el documento carece de número', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-sin-numero-'));const ctx={directory,sessionId:'test'};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  const p=path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt');const original=await readFile(p,'utf8');const changed=original.replace('No. CT-2026-016','SIN NÚMERO');assert.notEqual(changed,original);await writeFile(p,changed);
+  const extracted=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {data:Record<string,{valor:unknown;confianza:number}>};assert.equal(extracted.data.id_contrato.valor,null);assert.equal(extracted.data.id_contrato.confianza,0);
+  const validation=JSON.parse(await validar.execute({mensaje_id:'msg-002',contrato:extracted.data},ctx)) as {data:{requiere_revision:string[]}};assert.ok(!validation.data.requiere_revision.includes('id_contrato'));
+  const saved=JSON.parse(await registrar.execute({mensaje_id:'msg-002',contrato:extracted.data},ctx)) as {ok:boolean;data:{id_contrato:string;ruta_archivo:string}};assert.equal(saved.ok,true);assert.equal(saved.data.id_contrato,'AUTO-2026-001');assert.match(saved.data.ruta_archivo,/AUTO-2026-001\.txt$/);
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
 test('conserva el ID y solicita revisión si la coincidencia por NIT y objeto tiene otro identificador', async () => {
  const directory=await mkdtemp(path.join(tmpdir(),'reto-contratos-')); const ctx={directory,sessionId:'test'};
  const run=async(t:{execute:(a:unknown,c:typeof ctx)=>Promise<string>},a:unknown)=>JSON.parse(await t.execute(a,ctx)) as {ok:boolean;data?:Record<string,unknown>;error?:string};

@@ -16,7 +16,7 @@ export function isExplicitConfirmation(message: string): boolean {
   // A naked "no" is not consent, even after an affirmative prefix. The only
   // accepted occurrence is an adjacent explicit boolean field value; remove
   // that exact expression before checking for any remaining denial.
-  const withoutBooleanValues = text.replace(/(?:^|[^a-z0-9_])(?:requiere[_\s]+poliza|valor[_\s]+indeterminado)\s*(?:(?:es|sera|igual\s+a)\s*)?(?:[:=]\s*)?["'“”]?no["'“”]?(?![a-z0-9_])/g, ' ');
+  const withoutBooleanValues = text.replace(/(?:^|[^a-z0-9_])(?:requiere[_\s]+poliza|valor[_\s]+indeterminado)\s*(?:(?:es|sera|igual\s+a)\s*)?(?:[:=]\s*)?["'“”]?no["'“”]?(?![a-z0-9_])/g, ' ').replace(/(?:^|[^a-z0-9_])estado(?:[_\s]+de[_\s]+la)?[_\s]+poliza\s*(?:(?:es|sera|igual\s+a)\s*)?(?:[:=]\s*)?["'“”]?no[_\s]+aplica["'“”]?(?![a-z0-9_])/g,' ');
   if (/\bno\b/.test(withoutBooleanValues)) return false;
   return true;
 }
@@ -45,6 +45,14 @@ function mentionedFieldValue(message: string, name: string, value: unknown): boo
   // connectors; numeric boundaries prevent the 0 in a date from matching 0.
   const expression = new RegExp(`(?:^|[^a-z0-9_])(?:${labelPattern})(?![a-z0-9_])\\s*(?:(?:es|sera|igual\\s+a|de)\\s*)?(?:[:=]\\s*)?["'“”]?(${valuePattern})["'“”]?(?![a-z0-9_]|[.,-]\\d)`, 'i');
   return expression.test(normalize(message));
+}
+
+/** Every flagged field needs its own explicit value, even when it stays unchanged. */
+export function confirmedReviewError(message: string, review: string[], proposed: ConfirmedContract): string | null {
+  if (!isExplicitConfirmation(message)) return 'Se requiere confirmación humana explícita.';
+  const confirmsUndeterminedValue = proposed.valor?.valor === 0 && proposed.valor_indeterminado?.valor === true && mentionedFieldValue(message, 'valor', 'indeterminado');
+  const missing = review.filter(key => !proposed[key] || !(key === 'valor' && confirmsUndeterminedValue) && !mentionedFieldValue(message, key, proposed[key].valor));
+  return missing.length ? `Confirma explícitamente el campo y su valor para: ${missing.join(', ')}.` : null;
 }
 
 function validDate(value: unknown): boolean {

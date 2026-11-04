@@ -20,6 +20,8 @@ Se eligió este modelo por preferencia de la persona usuaria y para organizar re
 
 Se detectan el número, partes, identificación, cláusula de objeto, importe, moneda, plazo, póliza y remitente mediante patrones sobre el texto del adjunto. Los campos presentes reciben confianza 1; los ausentes, 0; el valor por demanda y la póliza condicional reciben 0,5. En `msg-006` el día de firma y las fechas de vigencia no aparecen, por lo que no se inventan. La fecha del correo tampoco prueba la fecha de firma. El modelo organiza y explica los resultados de las herramientas, pero el backend no acepta que altere valores salvo que una persona los indique y confirme explícitamente. Las heurísticas están adaptadas al formato de los fixtures: no son un extractor jurídico universal.
 
+`contratos_leer_fuente` permite consultar el texto original de los adjuntos simulados para responder sobre cláusulas que no forman parte del maestro, sin registrar ni modificar el contrato. Solo admite mensajes y nombres de adjuntos de los fixtures; el prompt trata el texto como evidencia no confiable, no como instrucciones. La lectura completa mejora la explicación, pero no sustituye la validación ni garantiza que el modelo interprete todos los contratos correctamente.
+
 Los identificadores exactos prevalecen; como alternativa se compara NIT y similitud normalizada de objeto (distancia de edición). Un otrosí exige registro previo y mantiene datos no modificados. Se archiva el adjunto de texto realmente recibido, sin fingir que es un PDF. Alertas usan una fecha de referencia explícita y el maestro de salida.
 
 ## Regla de gobierno propuesta
