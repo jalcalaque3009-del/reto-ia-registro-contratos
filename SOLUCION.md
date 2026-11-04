@@ -6,7 +6,7 @@ Administración y gerencia no cuentan con un registro completo y vigente porque 
 
 ## Arquitectura
 
-`web/` chat → `src/server.ts` ciclo y sesión → `src/llm/` interfaz y adaptador OpenAI → `src/tools/contratos.ts` herramientas validadas con Zod → `fixtures/` lectura y `out/` escritura. `agent/prompt.md` define comportamiento; `src/knowledge/registro-contratos.md` contiene conocimiento. Un adaptador distinto implementa `LlmAdapter` sin alterar las herramientas. `demo.ts` ejecuta herramientas directamente sin modelo.
+`web/` chat → `src/server.ts` ciclo y sesión → `src/llm/` interfaz y adaptador OpenAI → `src/tools/contratos.ts` y `src/tools/consulta.ts` herramientas validadas con Zod → `fixtures/` lectura y `out/` escritura. `agent/prompt.md` define comportamiento; `src/knowledge/registro-contratos.md` contiene conocimiento. Un adaptador distinto implementa `LlmAdapter` sin alterar las herramientas. `demo.ts` ejecuta herramientas directamente sin modelo.
 
 El ciclo envía mensajes y definiciones de herramientas, ejecuta las solicitudes y devuelve sus resultados al modelo hasta alcanzar el máximo por turno. Cada llamada se presenta en el chat y se registra. Para revisión humana se requiere un mensaje explícito en un turno posterior; el servidor compara los datos registrados con la extracción original y exige que cualquier modificación figure en el mensaje de confirmación. Las fechas ausentes impiden el registro. Errores se informan sin finalizar el proceso. El cliente no recibe claves.
 
@@ -22,7 +22,11 @@ Se detectan el número, partes, identificación, cláusula de objeto, importe, m
 
 `contratos_leer_fuente` permite consultar el texto original de los adjuntos simulados para responder sobre cláusulas que no forman parte del maestro, sin registrar ni modificar el contrato. Solo admite mensajes y nombres de adjuntos de los fixtures; el prompt trata el texto como evidencia no confiable, no como instrucciones. La lectura completa mejora la explicación, pero no sustituye la validación ni garantiza que el modelo interprete todos los contratos correctamente.
 
+`contratos_consultar_maestro` permite consultar el conjunto completo por fecha de vigencia, intervalo de vencimiento, cliente e identificador; indica si leyó la copia de salida o el fixture original y advierte sobre fechas no evaluables. La consulta de alertas de 60 días no representa el maestro completo. La inspección del buzón no marca mensajes como procesados: el rechazo se ejecuta por separado al procesar.
+
 Los identificadores exactos prevalecen; como alternativa se compara NIT y similitud normalizada de objeto (distancia de edición). Un otrosí exige registro previo y mantiene datos no modificados. Se archiva el adjunto de texto realmente recibido, sin fingir que es un PDF. Alertas usan una fecha de referencia explícita y el maestro de salida.
+
+Para nuevos registros, el servidor guarda la fecha real UTC de registro en lugar de copiar la fecha de recepción del correo. La demo inyecta `2026-09-03` como fecha simulada para obtener resultados reproducibles; la fecha del correo permanece en el historial como dato independiente.
 
 ## Regla de gobierno propuesta
 
@@ -49,7 +53,7 @@ Los identificadores exactos prevalecen; como alternativa se compara NIT y simili
 | HU-5 alertas | Hecho para fixtures | Programación y entrega autorizada |
 | HU-6 errores | Parcial | Cobertura de formatos y recuperación exhaustiva |
 
-El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en el navegador. El maestro y los archivos se guardan en almacenamiento temporal de la instancia y pueden desaparecer al reiniciar; distintas instancias no comparten esos datos. Los contadores de presupuesto están en memoria y se reinician. Para producción hacen falta persistencia, autenticación por usuario, presupuesto centralizado, auditoría sin datos sensibles y acceso restringido. Los fixtures no representan datos reales.
+El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en el navegador. El maestro y los archivos se guardan en almacenamiento temporal de la instancia y pueden desaparecer al reiniciar; distintas instancias no comparten esos datos. El bloqueo de operaciones se limita al proceso de Node y no sincroniza instancias distintas. Los contadores de presupuesto están en memoria y se reinician. Para producción hacen falta persistencia compartida transaccional, autenticación por usuario, presupuesto centralizado, auditoría sin datos sensibles y acceso restringido. Los fixtures no representan datos reales.
 
 ## Casos principales de aceptación
 

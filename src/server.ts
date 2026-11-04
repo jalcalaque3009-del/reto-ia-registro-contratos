@@ -3,6 +3,7 @@ import express from 'express';
 import { readFile, appendFile, mkdir, access } from 'node:fs/promises';
 import { z } from 'zod';
 import * as contractTools from './tools/contratos.js';
+import * as masterTools from './tools/consulta.js';
 import { OpenAiAdapter } from './llm/openai.js';
 import type { LlmAdapter } from './llm/adapter.js';
 import { loadApiKey } from './secret.js';
@@ -39,7 +40,7 @@ const sessions=new Map<string,Session>(); let totalTokens=0; let requestCount=0;
 function sessionKey(apiKey:string):Buffer {return Buffer.from(hkdfSync('sha256',apiKey,'reto-contratos-v1','session-encryption',32));}
 function seal(s:Session,apiKey:string):string {const iv=randomBytes(12);const cipher=createCipheriv('aes-256-gcm',sessionKey(apiKey),iv);const plaintext=JSON.stringify({...s,pending:[...s.pending],history:[],expires:Date.now()+72*3600_000});const body=Buffer.concat([cipher.update(plaintext,'utf8'),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64url'); }
 function unseal(token:string,apiKey:string):Session {if(token.length>200000)throw new Error('Sesión inválida');const raw=Buffer.from(token,'base64url');const decipher=createDecipheriv('aes-256-gcm',sessionKey(apiKey),raw.subarray(0,12));decipher.setAuthTag(raw.subarray(12,28));const decoded=JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)),decipher.final()]).toString('utf8')) as Session&{pending:string[];expires:number};if(decoded.expires<Date.now())throw new Error('Sesión vencida');return {...decoded,pending:new Set(decoded.pending),history:[]};}
-const tools=contractTools as Record<string,{description:string;args:z.ZodRawShape;execute:(a:unknown,c:{directory:string;sessionId:string})=>Promise<string>}>;
+const tools={...contractTools,...masterTools} as Record<string,{description:string;args:z.ZodRawShape;execute:(a:unknown,c:{directory:string;sessionId:string})=>Promise<string>}>;
 const definitions=Object.entries(tools).map(([name,t])=>({type:'function',function:{name:'contratos_'+name,description:t.description,parameters:z.toJSONSchema(z.object(t.args))}}));
 const context={directory:process.cwd(),sessionId:''};
 const agentPrompt=await readFile('agent/prompt.md','utf8'); const knowledge=await readFile('src/knowledge/registro-contratos.md','utf8');
@@ -59,7 +60,7 @@ app.post('/api/chat',async(req,res)=>{
  session.reviews ??= {};
  // Existing encrypted conversations retain their turns but receive the current instructions after deployment.
  session.messages[0]={role:'system',content:agentPrompt+'\n\n'+knowledge};
- sessions.set(sessionId,session); const pendingBeforeTurn=new Set(session.pending);
+ sessions.set(sessionId,session); const pendingBeforeTurn=new Set(session.pending); const originalsBeforeTurn=new Set(Object.keys(session.originals));
  if(session.tokens>=maxSessionTokens){res.status(429).json({error:'Se alcanzó el límite de tokens de esta sesión.'});return;}
  requestCount++; session.messages.push({role:'user',content:message}); session.history.push({role:'user',content:message}); const toolCalls:unknown[]=[]; let reply='Se alcanzó el límite de iteraciones. Continúa en un nuevo turno.'; let needsConfirmation=false; let alertDate:string|undefined; let alertsStale=false;
  const llm:LlmAdapter=new OpenAiAdapter(model,apiKey); const confirms=isExplicitConfirmation(message);
@@ -74,9 +75,21 @@ app.post('/api/chat',async(req,res)=>{
         const proposed=args.contrato as Record<string,{valor:unknown;confianza:number}>; const original=session.originals[id]; if(!original || !proposed)throw new Error('Primero extrae el contrato en esta sesión.');
         const confirmationError=confirmedChangesError(message,original,proposed);if(confirmationError)throw new Error(confirmationError);
         const hasChanges=Object.keys(original).some(k=>JSON.stringify(original[k].valor)!==JSON.stringify(proposed[k].valor));
-        if(hasChanges && (!confirms || !pendingBeforeTurn.has(id) || (name==='registrar' && args.confirmado!==true)))throw new Error('Los cambios requieren confirmación humana explícita en un turno posterior.');
-        if(name==='registrar' && args.confirmado===true && (!confirms || !pendingBeforeTurn.has(id)))throw new Error('Se requiere confirmación humana explícita en un turno posterior.');
-        if(name==='registrar' && args.confirmado===true) { const review=session.reviews?.[id]; if(!review)throw new Error('Vuelve a validar el contrato antes de confirmar sus campos.'); const reviewError=confirmedReviewError(message,review,proposed); if(reviewError)throw new Error(reviewError); }
+        // An explicit correction may also apply to a previously extracted clean
+        // contract; it must refer to an extraction from an earlier turn.
+        const manualCorrection=hasChanges && originalsBeforeTurn.has(id) && !pendingBeforeTurn.has(id);
+        if(hasChanges && (!confirms || (!pendingBeforeTurn.has(id) && !manualCorrection) || (name==='registrar' && args.confirmado!==true)))throw new Error('Los cambios requieren confirmación humana explícita en un turno posterior.');
+        if(name==='registrar' && args.confirmado===true && (!confirms || (!pendingBeforeTurn.has(id) && !manualCorrection)))throw new Error('Se requiere confirmación humana explícita en un turno posterior.');
+        if(name==='registrar' && args.confirmado===true) {
+          const review=session.reviews?.[id];
+          if(pendingBeforeTurn.has(id)){if(!review)throw new Error('Vuelve a validar el contrato antes de confirmar sus campos.');const reviewError=confirmedReviewError(message,review,proposed);if(reviewError)throw new Error(reviewError);}
+          else if(manualCorrection){
+            if(session.pending.has(id))throw new Error('El contrato requiere una nueva revisión; confirma sus campos en el siguiente turno.');
+            const checked=JSON.parse(await contractTools.validar.execute({mensaje_id:id,contrato:proposed},{...context,sessionId})) as {ok:boolean;error?:string;data?:{requiere_revision?:string[]}};
+            if(!checked.ok)throw new Error(checked.error||'No se pudo validar la corrección.');
+            const fields=checked.data?.requiere_revision??[];if(fields.length){session.reviews[id]=fields;session.pending.add(id);needsConfirmation=true;throw new Error('La corrección requiere una nueva revisión: '+fields.join(', ')+'. Confirma los campos en el siguiente turno.');}
+          }
+        }
         if(name==='registrar' && proposed.otrosi?.valor!==true && ['fecha_inicio','fecha_fin'].some(k=>!proposed[k]?.valor))throw new Error('Faltan fechas: pide a la persona los valores antes de registrar.');
       }
       result=await tool.execute(args,{...context,sessionId}); const data=JSON.parse(result) as {ok:boolean;data?:Record<string,unknown>};

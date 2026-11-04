@@ -4,8 +4,9 @@ import path from 'node:path';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
 import { outputDirectory } from '../paths.js';
+import { withWriteLock } from '../storage-lock.js';
 
-type Context = { directory: string; sessionId: string };
+type Context = { directory: string; sessionId: string; registrationDate?: string };
 type Row = Record<string, string>;
 type Field = { valor: string | number | boolean | null; confianza: number };
 type Contract = Record<string, Field>;
@@ -27,7 +28,7 @@ async function processed(c: Context): Promise<Record<string, string>> { try { re
 async function mark(c: Context, id: string, state: string) { const p = await processed(c); p[id] = state; await writeJson(output(c, 'procesados.json'), p); }
 async function log(c: Context, name: string, id: string, ok: boolean, summary: string) { await fs.mkdir(output(c), { recursive: true }); await fs.appendFile(output(c, 'log.jsonl'), JSON.stringify({ ts: new Date().toISOString(), herramienta: name, mensaje_id: id, ok, resumen: summary }) + '\n'); }
 function tool<T extends z.ZodRawShape>(name: string, description: string, args: T, fn: (a: z.infer<z.ZodObject<T>>, c: Context) => Promise<unknown>) {
-  return { description, args, async execute(raw: unknown, c: Context): Promise<string> { let ok = true; let result: unknown; try { const parsed = z.object(args).parse(raw); result = { ok: true, data: await fn(parsed, c) }; } catch (e) { ok = false; result = { ok: false, error: e instanceof Error ? e.message : 'Error desconocido' }; } try { await log(c, name, safe((raw as Record<string, unknown>)?.mensaje_id), ok, ok ? 'completada' : safe((result as {error?:string}).error)); } catch { /* no ocultar el resultado */ } return JSON.stringify(result); } };
+  return { description, args, async execute(raw: unknown, c: Context): Promise<string> { return withWriteLock(c.directory,async()=>{let ok = true; let result: unknown; try { const parsed = z.object(args).parse(raw); result = { ok: true, data: await fn(parsed, c) }; } catch (e) { ok = false; result = { ok: false, error: e instanceof Error ? e.message : 'Error desconocido' }; } try { await log(c, name, safe((raw as Record<string, unknown>)?.mensaje_id), ok, ok ? 'completada' : safe((result as {error?:string}).error)); } catch { /* no ocultar el resultado */ } return JSON.stringify(result);}); } };
 }
 const months: Record<string, string> = { enero:'01', febrero:'02', marzo:'03', abril:'04', mayo:'05', junio:'06', julio:'07', agosto:'08', septiembre:'09', octubre:'10', noviembre:'11', diciembre:'12' };
 function isValidDate(value: unknown): value is string {
@@ -36,6 +37,16 @@ function isValidDate(value: unknown): value is string {
   return Number.isFinite(ts) && new Date(ts).toISOString().slice(0,10) === value;
 }
 function dates(text: string): string[] { return [...text.matchAll(/\((\d{1,2})\) de (enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre) de (\d{4})/gi)].map(m => { const date = `${m[3]}-${months[m[2].toLowerCase()]}-${m[1].padStart(2,'0')}`; if (!isValidDate(date)) throw new Error('Fecha inválida en el contrato'); return date; }); }
+// Both common separator conventions are accepted only when the representation
+// is unambiguous. A single separator followed by three digits needs review.
+function parseAmount(raw:string):number|null {
+ if(!/^[\d.,]+$/.test(raw))return null;
+ const dot=raw.lastIndexOf('.'), comma=raw.lastIndexOf(',');
+ if(dot<0 && comma<0)return Number(raw);
+ if(dot>=0 && comma>=0){const decimal=dot>comma?'.':',';const group=decimal==='.'?',':'.';const parts=raw.split(decimal);if(parts.length!==2||!/^\d{1,2}$/.test(parts[1]))return null;const groups=parts[0].split(group);if(!/^\d{1,3}$/.test(groups[0])||groups.slice(1).some(s=>!/^\d{3}$/.test(s)))return null;return Number(groups.join('')+'.'+parts[1]);}
+ const separator=dot>=0?'.':',';const parts=raw.split(separator);if(parts.length===2){if(parts[1].length===3)return null;if(!/^\d{1,2}$/.test(parts[1]))return null;return Number(parts[0]+'.'+parts[1]);}
+ if(!/^\d{1,3}$/.test(parts[0])||parts.slice(1).some(s=>!/^\d{3}$/.test(s)))return null;return Number(parts.join(''));
+}
 async function email(c: Context, id: string) { return await readJson(fixture(c, 'buzon', id, 'correo.json')) as { id:string; de:string; asunto:string; fecha:string; adjuntos:string[] }; }
 async function extract(c: Context, id: string): Promise<Contract> {
   const mail = await email(c, id); const file = mail.adjuntos.find(a => /^(contrato|otrosi)\.txt$/i.test(a));
@@ -50,8 +61,8 @@ async function extract(c: Context, id: string): Promise<Contract> {
   if (!client && !object && !(isOther && idMatch)) throw new Error('No se identificaron partes y objeto del contrato');
   const clause = text.match(/(?:SEGUNDA\. VALOR\.|cláusula SEGUNDA \(VALOR\))[\s\S]*?(?=\n\s*TERCERA\.)/i)?.[0] ?? '';
   const money = clause.match(/\b(COP|USD|PEN|PAB|HNL)\s*\$?\s*([\d.,]+)/i); const undetermined = /no tiene un valor determinado/i.test(clause);
-  const number = money ? Number(money[1] === 'COP' ? money[2].replace(/\./g,'').replace(',', '.') : money[2].replace(/,/g,'')) : null;
-  if (money && !Number.isFinite(number)) throw new Error('Valor inválido');
+  const number = money ? parseAmount(money[2]) : null;
+  if (number !== null && !Number.isFinite(number)) throw new Error('Valor inválido');
   const unknownCurrency = clause.match(/\b([A-Z]{3})\s*\$?\s*\d[\d.,]*/);
   if (!money && !undetermined && unknownCurrency && !['COP','USD','PEN','PAB','HNL'].includes(unknownCurrency[1])) throw new Error('Moneda desconocida');
   const term = text.match(/(?:TERCERA\. PLAZO\.|cláusula TERCERA \(PLAZO\))[\s\S]*?(?=\n\s*(?:CUARTA|SEGUNDA)\.)/i)?.[0] ?? '';
@@ -66,13 +77,22 @@ async function extract(c: Context, id: string): Promise<Contract> {
     const marker=term.slice(0,at).match(/\b(?:desde|hasta)\b/gi)?.at(-1)?.toLowerCase();
     if(marker==='desde')startDate=ds[0];else if(marker==='hasta')endDate=ds[0];
   }
-  const hasPolicy = /(?:póliza|garantías de cumplimiento)/i.test(text); const conditionalPolicy = /Para cada orden de servicio/i.test(text);
+  const policyMention = /(?:póliza|garantías de cumplimiento)/i.test(text); const conditionalPolicy = /Para cada orden de servicio/i.test(text);
+  const negatedPolicy = /\bno\s+(?:(?:se|será|sera|deberá|debera|debe)\s+){0,2}(?:requiere|requerirá|requerira|exige|exigirá|exigira|exigir|requiera|constituir|constituirá|constituira)\s+(?:(?:una|la|ninguna)\s+)?póliza\b/i.test(text);
+  // A negation together with a qualification or a separate positive duty is
+  // ambiguous. Retain it for human review instead of guessing.
+  const positivePolicy = /(?:constituir(?:á|a)?|deberá\s+constituir|requiere|exige)\s+(?:(?:una|la)\s+)?póliza/i.test(text.replace(/\bno\s+(?:(?:se|será|sera|deberá|debera|debe)\s+){0,2}(?:requiere|requerirá|requerira|exige|exigirá|exigira|exigir|requiera|constituir|constituirá|constituira)\s+(?:(?:una|la|ninguna)\s+)?póliza\b/gi,''));
+  const conflictingPolicy = negatedPolicy && (positivePolicy || /\b(?:salvo|excepto)\b/i.test(text));
+  const hasPolicy:boolean|null = conflictingPolicy ? null : negatedPolicy ? false : policyMention;
+  const policyTypes=[...new Set([...text.matchAll(/póliza\s+de\s+(cumplimiento|responsabilidad\s+civil|calidad)/gi)].map(m=>m[1].toLowerCase().replace(/\s+/g,' ')))];
+  if(isOther && /garantías de cumplimiento/i.test(text))policyTypes.push('cumplimiento');
+  if(isOther && /garantías de cumplimiento y responsabilidad civil/i.test(text))policyTypes.push('responsabilidad civil');
   const conditionalPolicyText = conditionalPolicy ? text.match(/CUARTA\. GARANTÍAS\.\s*([\s\S]*?)(?=\n\s*\n|$)/i)?.[1].trim() ?? null : null;
   const sellers = await readJson(fixture(c,'comerciales.json')) as {email:string;nombre:string}[]; const seller = sellers.find(s => s.email.toLowerCase() === mail.de.toLowerCase());
   // Examine the counterparty portion, not the contractor's Colombian address.
   const counterparty = text.split(/,\s*y\s+PERIFERIA\b/i)[0];
   const country = !client ? null : /Ecuador/i.test(counterparty) ? 'EC' : /Perú/i.test(counterparty) ? 'PE' : /Panamá/i.test(counterparty) ? 'PA' : /Honduras/i.test(counterparty) || /^RTN$/i.test(client[2]) ? 'HN' : /Colombia/i.test(counterparty) || /^NIT$/i.test(client[2]) ? 'CO' : null;
-  return { id_contrato:field(idMatch?.[1] ?? null), cliente:field(client?.[1].trim() ?? null), nit_cliente:field(client?.[3].replace(/\D/g,'') ?? null), pais:field(country), objeto:field(object?.slice(0,200) ?? null), valor:field(undetermined ? 0 : number, undetermined ? .5 : number === null ? 0 : 1), valor_indeterminado:field(undetermined), moneda:field(money?.[1].toUpperCase() ?? null), fecha_inicio:field(startDate), fecha_fin:field(endDate), requiere_poliza:field(hasPolicy, conditionalPolicy ? .5 : 1), condicion_poliza:field(conditionalPolicyText), tipo_poliza:field(hasPolicy ? 'cumplimiento' : ''), estado_poliza:field(hasPolicy ? 'pendiente' : 'no_aplica', conditionalPolicy ? .5 : 1), comercial:field(seller?.nombre ?? null, seller ? 1 : 0), otrosi:field(isOther), remitente_desconocido:field(!seller) };
+  return { id_contrato:field(idMatch?.[1] ?? null), cliente:field(client?.[1].trim() ?? null), nit_cliente:field(client?.[3].replace(/\D/g,'') ?? null), pais:field(country), objeto:field(object?.slice(0,200) ?? null), valor:field(undetermined ? 0 : number, undetermined ? .5 : number === null ? 0 : 1), valor_indeterminado:field(undetermined), moneda:field(money?.[1].toUpperCase() ?? null), fecha_inicio:field(startDate), fecha_fin:field(endDate), requiere_poliza:field(hasPolicy, hasPolicy===null?0:conditionalPolicy ? .5 : 1), condicion_poliza:field(conditionalPolicyText), tipo_poliza:field(hasPolicy===null?null:hasPolicy ? policyTypes.length ? [...new Set(policyTypes)].join(';') : null : ''), estado_poliza:field(hasPolicy===null?null:hasPolicy ? 'pendiente' : 'no_aplica', hasPolicy===null?0:conditionalPolicy ? .5 : 1), comercial:field(seller?.nombre ?? null, seller ? 1 : 0), otrosi:field(isOther), remitente_desconocido:field(!seller) };
 }
 async function validate(c: Context, id: string, contract: Contract) {
   for (const key of ['fecha_inicio','fecha_fin']) { const value=val(contract,key); if (value !== null && !isValidDate(value)) throw new Error(`Fecha inválida: ${key}`); }
@@ -80,13 +100,18 @@ async function validate(c: Context, id: string, contract: Contract) {
   const currency=val(contract,'moneda'); if (currency!==null && (typeof currency!=='string' || !['COP','USD','PEN','PAB','HNL'].includes(currency))) throw new Error('Moneda desconocida');
   const country=val(contract,'pais'); if (country!==null && (typeof country!=='string' || !['CO','EC','PE','PA','HN'].includes(country))) throw new Error('País desconocido');
   const amount=val(contract,'valor'); if(amount!==null && (typeof amount!=='number' || !Number.isFinite(amount) || amount<0)) throw new Error('Valor inválido');
+  for(const key of ['requiere_poliza','valor_indeterminado','otrosi','remitente_desconocido']){const value=val(contract,key);if(value!==null&&typeof value!=='boolean')throw new Error(`Valor booleano inválido: ${key}`);}
+  const state=val(contract,'estado_poliza');if(state!==null&&(typeof state!=='string'||!['vigente','pendiente','vencida','no_aplica'].includes(state)))throw new Error('Estado de póliza inválido');
+  const policyType=val(contract,'tipo_poliza');if(policyType!==null&&typeof policyType!=='string')throw new Error('Tipo de póliza inválido');
+  const requiresPolicy=val(contract,'requiere_poliza');if(requiresPolicy===false&&state!==null&&state!=='no_aplica')throw new Error('Estado de póliza incompatible con la ausencia de póliza');
   const rows = await readRows(c); const exact = rows.find(r => r.id_contrato === val(contract,'id_contrato'));
   const existing = exact ?? rows.find(r => r.nit_cliente === val(contract,'nit_cliente') && similarity(r.objeto, safe(val(contract,'objeto'))) >= .9);
   const isOther = val(contract,'otrosi') === true;
   const classification = existing ? (exact && !isOther && ['valor','fecha_inicio','fecha_fin'].every(k => safe(val(contract,k)) === existing[k]) ? 'duplicado' : 'actualizacion') : 'nuevo';
   if (isOther && !existing) return { clasificacion:'rechazado', requiere_revision:[], motivo:'Otrosí sin contrato previo identificado' };
   const keys = ['id_contrato','cliente','nit_cliente','pais','objeto','valor','moneda','fecha_inicio','fecha_fin','requiere_poliza','estado_poliza'];
-  const review = keys.filter(k => (contract[k]?.confianza ?? 0) < .8 && !(k==='id_contrato' && val(contract,k)===null && !isOther) && !(isOther && ['objeto','fecha_inicio','requiere_poliza','estado_poliza'].includes(k)));
+  if(val(contract,'requiere_poliza')===true)keys.push('tipo_poliza');
+  const review = keys.filter(k => ((contract[k]?.confianza ?? 0) < .8 || val(contract,k)===null) && !(k==='id_contrato' && val(contract,k)===null && !isOther) && !(isOther && ['objeto','fecha_inicio','requiere_poliza','estado_poliza','tipo_poliza'].includes(k)));
   // Identity disagreements are not normal amendment changes. Amount and end-date changes
   // in a known amendment remain ordinary, traceable updates.
   const conflicts = existing ? ['id_contrato','nit_cliente','pais','cliente'].filter(k => {
@@ -113,9 +138,15 @@ export const leer_buzon = tool('contratos_leer_buzon','Lista mensajes pendientes
    }
   }
   mensajes.push({...m,tiene_contrato,...(motivo?{clasificacion:'rechazado',motivo}:{})});
-  if(motivo) await mark(c,id,'rechazado');
  }
  return {mensajes};
+});
+export const rechazar = tool('contratos_rechazar','Marca un mensaje como rechazado solo si no contiene un contrato identificable.',{mensaje_id:idSchema},async(a,c)=>{
+ const m=await email(c,a.mensaje_id);const hasContract=m.adjuntos.some(name=>/^(contrato|otrosi)\.txt$/i.test(name));
+ let motivo=hasContract?'':'Sin adjunto de contrato';
+ if(hasContract){try{await extract(c,a.mensaje_id);}catch(error){if(error instanceof Error&&error.message==='No se identificaron partes y objeto del contrato')motivo=error.message;else throw error;}}
+ if(!motivo)throw new Error('El mensaje contiene un contrato identificable y no puede rechazarse automáticamente');
+ await mark(c,a.mensaje_id,'rechazado');return {mensaje_id:a.mensaje_id,clasificacion:'rechazado',motivo};
 });
 export const extraer = tool('contratos_extraer','Extrae campos y confianza del texto de un contrato.',{mensaje_id:idSchema},async (a,c)=>extract(c,a.mensaje_id));
 export const leer_fuente = tool('contratos_leer_fuente','Consulta el texto original del mensaje y sus adjuntos ficticios para responder preguntas sobre cláusulas.',{mensaje_id:idSchema},async (a,c)=>{
@@ -140,8 +171,9 @@ export const registrar = tool('contratos_registrar','Registra o actualiza el con
  const rows=await readRows(c); const existing=rows.find(r=>r.id_contrato===v.id_contrato_existente); const mail=await email(c,a.mensaje_id); const attachment=mail.adjuntos.find(s=>/^(contrato|otrosi)\.txt$/i.test(s)); if(!attachment)throw new Error('Sin adjunto');
  let id=existing?.id_contrato || safe(val(a.contrato,'id_contrato')); if(!id){const year=safe(val(a.contrato,'fecha_inicio')).slice(0,4);if(!/^\d{4}$/.test(year))throw new Error('Fecha de inicio necesaria para generar identificador');let sequence=1;do{id=`AUTO-${year}-${String(sequence++).padStart(3,'0')}`;}while(rows.some(row=>row.id_contrato===id));} if(!/^[\w-]+$/.test(id))throw new Error('Identificador inválido');
  const date=safe(val(a.contrato,'fecha_inicio')) || existing?.fecha_inicio || mail.fecha.slice(0,10); const client=safe(val(a.contrato,'cliente')) || existing?.cliente || 'sin-cliente'; const relative=`Contratos/${date.slice(0,4)}/${slug(client)}/${id}${val(a.contrato,'otrosi')?'-otrosi':''}.txt`;
+ const registrationDate=c.registrationDate??new Date().toISOString().slice(0,10);if(!isValidDate(registrationDate))throw new Error('Fecha de registro inválida');
  const target=output(c,'sharepoint',...relative.split('/')); await fs.mkdir(path.dirname(target),{recursive:true}); await fs.copyFile(fixture(c,'buzon',a.mensaje_id,attachment),target);
- const row:Row=existing?{...existing}:Object.fromEntries(Object.keys(rows[0]).map(k=>[k,''])); for(const key of Object.keys(row)) { const value=val(a.contrato,key); if(value!==null && !(existing && val(a.contrato,'otrosi')===true && ['requiere_poliza','tipo_poliza','estado_poliza'].includes(key))) row[key]=safe(value); } row.id_contrato=id; row.ruta_sharepoint=relative; if(existing){row.fecha_registro=existing.fecha_registro;row.fuente=existing.fuente;}else{row.fecha_registro=mail.fecha.slice(0,10);row.fuente='buzon';} if(!existing)rows.push(row);else rows[rows.indexOf(existing)]=row;
+ const row:Row=existing?{...existing}:Object.fromEntries(Object.keys(rows[0]).map(k=>[k,''])); for(const key of Object.keys(row)) { const value=val(a.contrato,key); if(value!==null && !(existing && val(a.contrato,'otrosi')===true && ['requiere_poliza','tipo_poliza','estado_poliza'].includes(key))) row[key]=safe(value); } row.id_contrato=id; row.ruta_sharepoint=relative; if(existing){row.fecha_registro=existing.fecha_registro;row.fuente=existing.fuente;}else{row.fecha_registro=registrationDate;row.fuente='buzon';} if(!existing)rows.push(row);else rows[rows.indexOf(existing)]=row;
  const changes=existing?Object.fromEntries(Object.keys(row).filter(k=>row[k]!==existing[k]).map(k=>[k,{antes:existing[k],despues:row[k]}])):{};
  await saveRows(c,rows); await fs.appendFile(output(c,'sharepoint','historial.jsonl'),JSON.stringify({ts:new Date().toISOString(),id_contrato:id,accion:v.clasificacion,cambios:changes,mensaje_id:a.mensaje_id,fecha_mensaje:mail.fecha})+'\n'); await mark(c,a.mensaje_id,v.clasificacion); return {id_contrato:id,accion:v.clasificacion,ruta_archivo:relative};
 });

@@ -1,7 +1,7 @@
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
-import { leer_buzon, extraer, validar, registrar, alertas } from './src/tools/contratos.js';
-const ctx={directory:process.cwd(),sessionId:'demo'};
+import { leer_buzon, extraer, validar, registrar, rechazar, alertas } from './src/tools/contratos.js';
+const ctx={directory:process.cwd(),sessionId:'demo',registrationDate:'2026-09-03'};
 type Result={ok:boolean;data?:Record<string,unknown>;error?:string};
 const run=async (tool:{execute:(a:unknown,c:typeof ctx)=>Promise<string>},a:unknown):Promise<Result>=>JSON.parse(await tool.execute(a,ctx)) as Result;
 // Keep the deterministic demo isolated from any custom server output directory.
@@ -11,7 +11,7 @@ await rm(demoOutput,{recursive:true,force:true});
 const inbox=await run(leer_buzon,{});
 if(!inbox.ok || !Array.isArray(inbox.data?.mensajes)) throw new Error(inbox.error || 'No se pudo leer el buzón');
 for(const m of inbox.data.mensajes as {id:string;tiene_contrato:boolean;clasificacion?:string;motivo?:string}[]) {
- if(!m.tiene_contrato || m.clasificacion==='rechazado'){console.log(m.id,'rechazado:',m.motivo||'sin contrato');continue;}
+ if(!m.tiene_contrato || m.clasificacion==='rechazado'){const result=await run(rechazar,{mensaje_id:m.id});console.log(m.id,result.ok?'rechazado:':'error:',result.ok?(m.motivo||'sin contrato'):result.error);continue;}
  const ext=await run(extraer,{mensaje_id:m.id}); if(!ext.ok){console.log(m.id,'error:',ext.error);continue;}
  const contract=ext.data; const valid=await run(validar,{mensaje_id:m.id,contrato:contract});
  if(!valid.ok){console.log(m.id,'error:',valid.error);continue;}

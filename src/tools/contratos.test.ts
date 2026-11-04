@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, cp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { leer_buzon, leer_fuente, extraer, validar, registrar, alertas } from './contratos.js';
+import { leer_buzon, leer_fuente, extraer, validar, registrar, rechazar, alertas } from './contratos.js';
 import { parse } from 'csv-parse/sync';
 
 test('consulta los textos originales sin cambiar el buzón ni permitir rutas arbitrarias', async () => {
@@ -34,6 +34,8 @@ test('procesa los seis casos, conserva el maestro original y exige revisión', a
   const original=await readFile(path.join(directory,'fixtures/reto-02/maestro-contratos.csv'),'utf8');
   const inbox=await execute(leer_buzon,{}); assert.equal(inbox.ok,true); const messages=inbox.data?.mensajes as Array<{id:string;tiene_contrato:boolean;clasificacion?:string;motivo?:string}>; assert.equal(messages.length,6);
   const quote=messages.find(message=>message.id==='msg-005'); assert.equal(quote?.tiene_contrato,false); assert.equal(quote?.clasificacion,'rechazado'); assert.match(quote?.motivo??'',/sin adjunto/i);
+  const viewedAgain=await execute(leer_buzon,{});assert.ok((viewedAgain.data?.mensajes as Array<{id:string}>).some(m=>m.id==='msg-005'),'La consulta del buzón no debe marcar mensajes');
+  assert.equal((await execute(rechazar,{mensaje_id:'msg-005'})).ok,true);assert.equal((await execute(rechazar,{mensaje_id:'msg-001'})).ok,false);
   const expected:Record<string,string>={'msg-001':'nuevo','msg-002':'nuevo','msg-003':'actualizacion','msg-004':'duplicado','msg-006':'nuevo'};
   for(const [id,classification] of Object.entries(expected)) {
    const e=await execute(extraer,{mensaje_id:id});assert.equal(e.ok,true,id); const v=await execute(validar,{mensaje_id:id,contrato:e.data}); assert.equal(v.data?.clasificacion,classification,id);
@@ -168,7 +170,8 @@ test('rechaza texto sin partes ni objeto y continúa con los demás mensajes', a
   const empty=inbox.data.mensajes.find(m=>m.id==='msg-002');assert.equal(empty?.clasificacion,undefined);
   const extractedEmpty=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {ok:boolean;error:string};assert.equal(extractedEmpty.ok,false);assert.match(extractedEmpty.error,/vacío/i);
   const next=JSON.parse(await extraer.execute({mensaje_id:'msg-003'},ctx)) as {ok:boolean};assert.equal(next.ok,true);
-  const after=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(!after.data.mensajes.some(m=>m.id==='msg-001'));assert.ok(after.data.mensajes.some(m=>m.id==='msg-002'));
+  const after=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(after.data.mensajes.some(m=>m.id==='msg-001'));assert.ok(after.data.mensajes.some(m=>m.id==='msg-002'));
+  assert.equal((JSON.parse(await rechazar.execute({mensaje_id:'msg-001'},ctx)) as {ok:boolean}).ok,true);const afterReject=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(!afterReject.data.mensajes.some(m=>m.id==='msg-001'));
  } finally {await rm(directory,{recursive:true,force:true});}
 });
 
@@ -185,4 +188,52 @@ test('alertas incluyen los días 0 y 60, excluyen el 61 y separan pólizas vigen
   assert.equal(report.ok,true);const expiring=report.data.vencen.map(r=>r.id_contrato);assert.ok(expiring.includes('TEST-0'));assert.ok(expiring.includes('TEST-60'));assert.ok(!expiring.includes('TEST-61'));assert.ok(!expiring.includes('TEST-EXPIRED'));
   const policy=report.data.polizas_pendientes.map(r=>r.id_contrato);assert.ok(policy.includes('TEST-0'));assert.ok(policy.includes('TEST-61'));assert.ok(!policy.includes('TEST-60'));assert.ok(!policy.includes('TEST-EXPIRED'));
  } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test('interpreta negación y tipos de póliza sin inventar cumplimiento', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-polizas-'));const ctx={directory,sessionId:'test'};
+ try{
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  const file=path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt');const original=await readFile(file,'utf8');
+  await writeFile(file,original.replace('Para constancia se firma','No se requiere póliza.\n\nPara constancia se firma'));
+  const no=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {data:Record<string,{valor:unknown;confianza:number}>};assert.equal(no.data.requiere_poliza.valor,false);assert.equal(no.data.estado_poliza.valor,'no_aplica');
+  const file2=path.join(directory,'fixtures/reto-02/buzon/msg-001/contrato.txt');const initial=await readFile(file2,'utf8');await writeFile(file2,initial.replace('póliza de cumplimiento','póliza de responsabilidad civil'));
+  const civil=JSON.parse(await extraer.execute({mensaje_id:'msg-001'},ctx)) as {data:Record<string,{valor:unknown;confianza:number}>};assert.equal(civil.data.tipo_poliza.valor,'responsabilidad civil');
+  await writeFile(file,original.replace('Para constancia se firma','No se requiere póliza, salvo si existe una orden especial.\n\nPara constancia se firma'));
+  const conditional=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {data:Record<string,{valor:unknown;confianza:number}>};assert.equal(conditional.data.requiere_poliza.valor,null);assert.equal(conditional.data.requiere_poliza.confianza,0);
+  const validation=JSON.parse(await validar.execute({mensaje_id:'msg-002',contrato:conditional.data},ctx)) as {data:{requiere_revision:string[]}};assert.ok(validation.data.requiere_revision.includes('requiere_poliza'));
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('interpreta formatos monetarios inequívocos y exige revisión de separadores ambiguos', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-importes-'));const ctx={directory,sessionId:'test'};
+ try{
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});const file=path.join(directory,'fixtures/reto-02/buzon/msg-001/contrato.txt');const text=await readFile(file,'utf8');
+  for(const [amount,expected] of [['100,000.00',100000],['100.000,00',100000],['100.000.000',100000000],['100.000',null]] as const){
+   await writeFile(file,text.replace('265.000.000',amount));const result=JSON.parse(await extraer.execute({mensaje_id:'msg-001'},ctx)) as {ok:boolean;data:Record<string,{valor:unknown;confianza:number}>};assert.equal(result.ok,true);assert.equal(result.data.valor.valor,expected,amount);if(expected===null){assert.equal(result.data.valor.confianza,0);const v=JSON.parse(await validar.execute({mensaje_id:'msg-001',contrato:result.data},ctx)) as {data:{requiere_revision:string[]}};assert.ok(v.data.requiere_revision.includes('valor'));}
+  }
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('rechaza tipos y estados de póliza inválidos antes de registrar', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-tipos-'));const ctx={directory,sessionId:'test'};
+ try{await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});const e=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {data:Record<string,{valor:unknown;confianza:number}>};
+  for(const [key,value] of [['requiere_poliza','quizá'],['estado_poliza','desconocido']] as const){const candidate=structuredClone(e.data);candidate[key].valor=value;const v=JSON.parse(await validar.execute({mensaje_id:'msg-002',contrato:candidate},ctx)) as {ok:boolean;error:string};assert.equal(v.ok,false);assert.match(v.error,/inválido/);const w=JSON.parse(await registrar.execute({mensaje_id:'msg-002',contrato:candidate,confirmado:true},ctx)) as {ok:boolean};assert.equal(w.ok,false);}
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('usa fecha de registro explícita y no fecha de recepción, preservando el correo en historial', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-fecha-registro-'));const ctx={directory,sessionId:'test',registrationDate:'2026-09-03'};
+ try{await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});const e=JSON.parse(await extraer.execute({mensaje_id:'msg-001'},ctx)) as {data:Record<string,unknown>};const result=JSON.parse(await registrar.execute({mensaje_id:'msg-001',contrato:e.data},ctx)) as {ok:boolean};assert.equal(result.ok,true);
+  const rows=parse(await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8'),{columns:true,skip_empty_lines:true}) as Array<{id_contrato:string;fecha_registro:string}>;assert.equal(rows.find(r=>r.id_contrato==='CT-2026-015')?.fecha_registro,'2026-09-03');
+  const log=JSON.parse((await readFile(path.join(directory,'out/sharepoint/historial.jsonl'),'utf8')).trim()) as {fecha_mensaje:string};assert.equal(log.fecha_mensaje,'2026-08-04T09:12:00-05:00');
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('registros simultáneos no pierden filas ni marcadores en el mismo proceso', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-concurrencia-'));const ctx={directory,sessionId:'test'};
+ try{await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});const a=JSON.parse(await extraer.execute({mensaje_id:'msg-001'},ctx)) as {data:Record<string,unknown>};const b=JSON.parse(await extraer.execute({mensaje_id:'msg-002'},ctx)) as {data:Record<string,unknown>};
+  const results=await Promise.all([registrar.execute({mensaje_id:'msg-001',contrato:a.data},ctx),registrar.execute({mensaje_id:'msg-002',contrato:b.data},ctx)]);assert.ok(results.every(s=>(JSON.parse(s) as {ok:boolean}).ok));
+  const csv=await readFile(path.join(directory,'out/sharepoint/maestro-contratos.csv'),'utf8');assert.match(csv,/CT-2026-015/);assert.match(csv,/CT-2026-016/);const done=JSON.parse(await readFile(path.join(directory,'out/procesados.json'),'utf8')) as Record<string,string>;assert.equal(done['msg-001'],'nuevo');assert.equal(done['msg-002'],'nuevo');
+ }finally{await rm(directory,{recursive:true,force:true});}
 });
