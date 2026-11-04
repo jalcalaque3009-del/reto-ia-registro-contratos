@@ -3,8 +3,27 @@ import assert from 'node:assert/strict';
 import { mkdtemp, cp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { leer_buzon, extraer, validar, registrar, alertas } from './contratos.js';
+import { leer_buzon, leer_fuente, extraer, validar, registrar, alertas } from './contratos.js';
 import { parse } from 'csv-parse/sync';
+
+test('consulta los textos originales sin cambiar el buzón ni permitir rutas arbitrarias', async () => {
+ const directory=await mkdtemp(path.join(tmpdir(),'reto-fuente-')); const ctx={directory,sessionId:'test'};
+ try {
+  await cp(path.join(process.cwd(),'fixtures'),path.join(directory,'fixtures'),{recursive:true});
+  for(const [id,name] of [['msg-001','contrato.txt'],['msg-003','otrosi.txt'],['msg-005','cotizacion.txt'],['msg-006','contrato.txt']] as const){
+   const result=JSON.parse(await leer_fuente.execute({mensaje_id:id},ctx)) as {ok:boolean;data:{mensaje_id:string;adjuntos:Array<{archivo:string;texto:string}>}};
+   assert.equal(result.ok,true);assert.equal(result.data.mensaje_id,id);assert.equal(result.data.adjuntos[0].archivo,name);
+   assert.equal(result.data.adjuntos[0].texto,await readFile(path.join(directory,'fixtures/reto-02/buzon',id,name),'utf8'));
+   if(id==='msg-006')assert.match(result.data.adjuntos[0].texto,/prorrogables automáticamente por periodos iguales salvo aviso en contrario con treinta \(30\) días de antelación/);
+  }
+  const invalid=JSON.parse(await leer_fuente.execute({mensaje_id:'../../.env'},ctx)) as {ok:boolean};assert.equal(invalid.ok,false);
+  const emailPath=path.join(directory,'fixtures/reto-02/buzon/msg-001/correo.json');const mail=JSON.parse(await readFile(emailPath,'utf8')) as {adjuntos:string[]};mail.adjuntos.push('../../.env');await writeFile(emailPath,JSON.stringify(mail));
+  const safe=JSON.parse(await leer_fuente.execute({mensaje_id:'msg-001'},ctx)) as {data:{adjuntos:Array<{archivo:string}>}};assert.deepEqual(safe.data.adjuntos.map(a=>a.archivo),['contrato.txt']);
+  await writeFile(path.join(directory,'fixtures/reto-02/buzon/msg-002/contrato.txt'),'');const empty=JSON.parse(await leer_fuente.execute({mensaje_id:'msg-002'},ctx)) as {ok:boolean;error:string};assert.equal(empty.ok,false);assert.match(empty.error,/vacío/);
+  const missing=JSON.parse(await leer_fuente.execute({mensaje_id:'msg-999'},ctx)) as {ok:boolean};assert.equal(missing.ok,false);
+  const inbox=JSON.parse(await leer_buzon.execute({},ctx)) as {data:{mensajes:Array<{id:string}>}};assert.ok(inbox.data.mensajes.some(m=>m.id==='msg-001'));
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
 import { stringify } from 'csv-stringify/sync';
 
 test('procesa los seis casos, conserva el maestro original y exige revisión', async () => {

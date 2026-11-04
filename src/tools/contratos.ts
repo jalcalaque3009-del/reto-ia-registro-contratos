@@ -103,6 +103,22 @@ export const leer_buzon = tool('contratos_leer_buzon','Lista mensajes pendientes
  return {mensajes};
 });
 export const extraer = tool('contratos_extraer','Extrae campos y confianza del texto de un contrato.',{mensaje_id:idSchema},async (a,c)=>extract(c,a.mensaje_id));
+export const leer_fuente = tool('contratos_leer_fuente','Consulta el texto original del mensaje y sus adjuntos ficticios para responder preguntas sobre cláusulas.',{mensaje_id:idSchema},async (a,c)=>{
+ const root=fixture(c,'buzon',a.mensaje_id); let mail:{id:string;de:string;asunto:string;fecha:string;cuerpo?:string;adjuntos:string[]};
+ try {mail=await readJson(path.join(root,'correo.json')) as typeof mail;}catch{throw new Error('Mensaje no encontrado o ilegible');}
+ if(!Array.isArray(mail.adjuntos)) throw new Error('Lista de adjuntos inválida');
+ const adjuntos:Array<{archivo:string;texto:string}>=[];
+ for(const name of mail.adjuntos){
+  // Never resolve arbitrary paths from fixture metadata or from the model.
+  if(!/^(contrato|otrosi|cotizacion)\.txt$/i.test(name)) continue;
+  const file=path.join(root,name);let stat:Awaited<ReturnType<typeof fs.lstat>>;try{stat=await fs.lstat(file);}catch{throw new Error('Adjunto no disponible');}
+  if(!stat.isFile() || stat.isSymbolicLink() || stat.size>65536) throw new Error('Adjunto no disponible o demasiado grande');
+  const texto=await fs.readFile(file,'utf8');if(!texto.trim()) throw new Error('El texto del adjunto está vacío');
+  adjuntos.push({archivo:name,texto});
+ }
+ if(!adjuntos.length) throw new Error('No hay adjuntos de texto disponibles para consultar');
+ return {mensaje_id:a.mensaje_id,correo:{de:mail.de,asunto:mail.asunto,fecha:mail.fecha,cuerpo:mail.cuerpo??null},adjuntos};
+});
 export const validar = tool('contratos_validar','Clasifica el contrato y señala campos que requieren revisión.',{mensaje_id:idSchema,contrato:contractSchema.describe('Campos extraídos con su nivel de confianza')},async(a,c)=>validate(c,a.mensaje_id,a.contrato));
 export const registrar = tool('contratos_registrar','Registra o actualiza el contrato después de la revisión necesaria.',{mensaje_id:idSchema,contrato:contractSchema.describe('Contrato validado'),confirmado:z.boolean().optional().describe('Confirmación humana explícita')},async(a,c)=>{
  const v=await validate(c,a.mensaje_id,a.contrato); if(v.clasificacion==='rechazado') throw new Error(v.motivo); if(v.requiere_revision.length && !a.confirmado) throw new Error('requiere revisión: '+v.requiere_revision.join(', ')); if(v.clasificacion==='duplicado') { await mark(c,a.mensaje_id,'duplicado'); return {accion:'duplicado',id_contrato:v.id_contrato_existente,ruta_archivo:null}; } if(val(a.contrato,'otrosi')!==true && ['fecha_inicio','fecha_fin'].some(k=>!val(a.contrato,k)))throw new Error('Las fechas de inicio y fin deben ser proporcionadas por el revisor');

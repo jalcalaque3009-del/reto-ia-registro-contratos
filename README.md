@@ -6,6 +6,8 @@ Demo: https://reto-ia-registro-contratos.vercel.app/ (requiere la contraseña de
 
 El reto exige procesar los adjuntos de texto que ya están en el buzón simulado. No requiere subir archivos desde el chat. La lectura de PDF nativo es opcional en el documento y no está implementada en este prototipo.
 
+La extracción para el maestro usa reglas adaptadas a los fixtures y obtiene solo ciertos campos. Para responder preguntas sobre otras cláusulas de los contratos de muestra, el agente puede consultar el texto original de cada adjunto; no utiliza OCR ni acepta archivos subidos por el usuario. La interpretación del modelo puede equivocarse y debe cotejarse con el texto original.
+
 ## Requisitos y ejecución
 
 Node.js 20 o superior y npm. Desde la carpeta raíz:
