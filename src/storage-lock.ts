@@ -18,8 +18,15 @@ export async function withWriteLock<T>(projectDirectory: string, operation: () =
     // Hosted deployments must fail closed rather than silently fall back to
     // an instance-local registry if the shared database is unavailable.
     if (process.env.CONTRATOS_PERSISTENCE === 'postgres' || process.env.VERCEL) {
-      const { withPostgresSnapshot } = await import('./postgres-storage.js');
-      return await withPostgresSnapshot(operation);
+      try {
+        const { withPostgresSnapshot } = await import('./postgres-storage.js');
+        return await withPostgresSnapshot(operation);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') throw error;
+        // Provider errors can contain connection details. Never expose them to
+        // the model, browser, or logs.
+        throw new Error('No se pudo acceder al almacenamiento compartido.');
+      }
     }
     return await operation();
   } finally {

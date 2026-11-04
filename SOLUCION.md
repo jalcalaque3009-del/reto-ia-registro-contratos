@@ -53,7 +53,7 @@ Para nuevos registros, el servidor guarda la fecha real UTC de registro en lugar
 | HU-5 alertas | Hecho para fixtures | Programación y entrega autorizada |
 | HU-6 errores | Parcial | Cobertura de formatos y recuperación exhaustiva |
 
-El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en el navegador. El maestro y los archivos se guardan en almacenamiento temporal de la instancia y pueden desaparecer al reiniciar; distintas instancias no comparten esos datos. El bloqueo de operaciones se limita al proceso de Node y no sincroniza instancias distintas. Los contadores de presupuesto están en memoria y se reinician. Para producción hacen falta persistencia compartida transaccional, autenticación por usuario, presupuesto centralizado, auditoría sin datos sensibles y acceso restringido. Los fixtures no representan datos reales.
+El adaptador de Vercel utiliza un contexto de sesión cifrado y autenticado en el navegador. El maestro y los archivos de salida se conservan como una instantánea privada en PostgreSQL, bajo una transacción y un bloqueo compartido entre instancias; cada operación usa un directorio temporal aislado y los fallos descartan escrituras parciales. El límite de la instantánea es de 16 MiB. Las salidas previas que solo existían en `/tmp` no se migran automáticamente. En local se conservan los archivos del ejercicio y un bloqueo por proceso. Los contadores de presupuesto siguen en memoria y se reinician. Para producción hacen falta autenticación por usuario, presupuesto centralizado, una auditoría independiente y controles de acceso adicionales. Los fixtures no representan datos reales.
 
 ## Casos principales de aceptación
 

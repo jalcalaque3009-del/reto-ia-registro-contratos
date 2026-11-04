@@ -3,22 +3,24 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { outputDirectory } from './paths.js';
-import { configuredPostgresUrl, withPostgresSnapshot, type SnapshotClient } from './postgres-storage.js';
+import { configuredPostgresUrl, snapshotNamespace, withPostgresSnapshot, type SnapshotClient } from './postgres-storage.js';
 
 class FakeDatabase {
- files: Record<string,string> = {};
+ snapshots = new Map<number,Record<string,string>>();
+ get files(): Record<string,string> { return this.snapshots.get(1) ?? {}; }
+ set files(value:Record<string,string>) { this.snapshots.set(1,value); }
  tail: Promise<void> = Promise.resolve();
  client(): SnapshotClient {
-  let unlock: (() => void) | undefined; let staged: Record<string,string> | undefined;
+  let unlock: (() => void) | undefined; let staged: Record<string,string> | undefined; let stagedId=0;
   return {
    query: async (sql, parameters) => {
     if (sql.includes('pg_advisory_xact_lock')) {
      const previous = this.tail; let release!: () => void;
      const gate = new Promise<void>(resolve => { release = resolve; });
      this.tail = previous.then(() => gate); await previous; unlock = release;
-    } else if (sql.startsWith('SELECT files')) return {rows:[{files:structuredClone(this.files)}]};
-    else if (sql.startsWith('INSERT INTO contratos_snapshot')) staged=JSON.parse(String(parameters?.[0])) as Record<string,string>;
-    else if (sql==='COMMIT') { if (staged) this.files=staged; unlock?.(); unlock=undefined; }
+    } else if (sql.startsWith('SELECT files')) {const files=this.snapshots.get(Number(parameters?.[0]));return {rows:files?[{files:structuredClone(files)}]:[]};}
+    else if (sql.startsWith('INSERT INTO contratos_snapshot')) {stagedId=Number(parameters?.[0]);staged=JSON.parse(String(parameters?.[1])) as Record<string,string>;}
+    else if (sql==='COMMIT') { if (staged) this.snapshots.set(stagedId,staged); unlock?.(); unlock=undefined; }
     else if (sql==='ROLLBACK') { unlock?.(); unlock=undefined; }
     return {rows:[]};
    },
@@ -32,6 +34,17 @@ test('Postgres connection accepts either documented environment variable name', 
  assert.equal(configuredPostgresUrl({DATABASE_URL:'database-test'}),'database-test');
  assert.equal(configuredPostgresUrl({POSTGRES_URL:'postgres-test',DATABASE_URL:'database-test'}),'postgres-test');
  assert.throws(()=>configuredPostgresUrl({}),/POSTGRES_URL o DATABASE_URL/);
+});
+
+test('production and preview use separate snapshot IDs and unknown Vercel environments fail closed', async () => {
+ const db=new FakeDatabase();
+ const preview={VERCEL:'1',VERCEL_ENV:'preview'}, production={VERCEL:'1',VERCEL_ENV:'production'};
+ assert.equal(snapshotNamespace(preview),1);assert.equal(snapshotNamespace(production),2);
+ assert.throws(()=>snapshotNamespace({VERCEL:'1'}),/entorno de Vercel/);
+ await withPostgresSnapshot(async()=>{await fs.writeFile(path.join(outputDirectory('unused'),'preview.txt'),'preview');return JSON.stringify({ok:true});},db.client(),preview);
+ await withPostgresSnapshot(async()=>{assert.deepEqual(await fs.readdir(outputDirectory('unused')),[]);await fs.writeFile(path.join(outputDirectory('unused'),'production.txt'),'production');return JSON.stringify({ok:true});},db.client(),production);
+ assert.deepEqual(Object.keys(db.snapshots.get(1)??{}),['preview.txt']);
+ assert.deepEqual(Object.keys(db.snapshots.get(2)??{}),['production.txt']);
 });
 
 test('the snapshot persists complete files and rolls back a failed tool result', async () => {

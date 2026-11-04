@@ -18,6 +18,13 @@ export function configuredPostgresUrl(env: NodeJS.ProcessEnv = process.env): str
  return connectionString;
 }
 
+/** Preview and local tests never share the production snapshot. */
+export function snapshotNamespace(env: NodeJS.ProcessEnv = process.env): number {
+ if (env.VERCEL_ENV === 'production') return 2;
+ if (env.VERCEL_ENV === 'preview' || env.VERCEL_ENV === 'development' || !env.VERCEL) return 1;
+ throw new Error('No se pudo identificar el entorno de Vercel para aislar los datos.');
+}
+
 function getPool(): Pool {
  const connectionString = configuredPostgresUrl();
  pool ??= new Pool({ connectionString, max: 2, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000, allowExitOnIdle: true });
@@ -61,7 +68,8 @@ async function captureSnapshot(root: string): Promise<Snapshot> {
 }
 
 /** Execute one complete tool operation as a serializable snapshot transaction. */
-export async function withPostgresSnapshot<T>(operation: () => Promise<T>, testClient?: SnapshotClient): Promise<T> {
+export async function withPostgresSnapshot<T>(operation: () => Promise<T>, testClient?: SnapshotClient, environment: NodeJS.ProcessEnv = process.env): Promise<T> {
+ const namespace = snapshotNamespace(environment);
  const client = testClient ?? await getPool().connect() as unknown as SnapshotClient;
  let directory: string | undefined;
  try {
@@ -69,7 +77,7 @@ export async function withPostgresSnapshot<T>(operation: () => Promise<T>, testC
   // A transaction-scoped advisory lock serializes both first-time creation and updates.
   await client.query('SELECT pg_advisory_xact_lock($1)', [867231041]);
   await client.query('CREATE TABLE IF NOT EXISTS contratos_snapshot (id INTEGER PRIMARY KEY, files JSONB NOT NULL)');
-  const result = await client.query('SELECT files FROM contratos_snapshot WHERE id = 1');
+  const result = await client.query('SELECT files FROM contratos_snapshot WHERE id = $1', [namespace]);
   const files = result.rows[0]?.files ?? {};
   if (!files || typeof files !== 'object' || Array.isArray(files)) throw new Error('Datos persistidos inválidos.');
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'contratos-snapshot-'));
@@ -102,12 +110,12 @@ export async function withPostgresSnapshot<T>(operation: () => Promise<T>, testC
    const currentBytes=Object.values(baseline).reduce((sum,encoded)=>sum+Buffer.from(encoded,'base64').length,0);
    if (currentBytes + Buffer.byteLength(line) > maxBytes) { await client.query('ROLLBACK'); return value; }
    baseline['log.jsonl'] = Buffer.from(previous + line).toString('base64');
-   await client.query('INSERT INTO contratos_snapshot (id, files) VALUES (1, $1::jsonb) ON CONFLICT (id) DO UPDATE SET files = EXCLUDED.files', [JSON.stringify(baseline)]);
+   await client.query('INSERT INTO contratos_snapshot (id, files) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET files = EXCLUDED.files', [namespace, JSON.stringify(baseline)]);
    await client.query('COMMIT');
    return value;
   }
   const snapshot = await captureSnapshot(directory);
-  await client.query('INSERT INTO contratos_snapshot (id, files) VALUES (1, $1::jsonb) ON CONFLICT (id) DO UPDATE SET files = EXCLUDED.files', [JSON.stringify(snapshot)]);
+  await client.query('INSERT INTO contratos_snapshot (id, files) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO UPDATE SET files = EXCLUDED.files', [namespace, JSON.stringify(snapshot)]);
   await client.query('COMMIT');
   return value;
  } catch (error) {
