@@ -15,6 +15,12 @@ export async function withWriteLock<T>(projectDirectory: string, operation: () =
   tails.set(key, tail);
   await previous;
   try {
+    // Hosted deployments must fail closed rather than silently fall back to
+    // an instance-local registry if the shared database is unavailable.
+    if (process.env.CONTRATOS_PERSISTENCE === 'postgres' || process.env.VERCEL) {
+      const { withPostgresSnapshot } = await import('./postgres-storage.js');
+      return await withPostgresSnapshot(operation);
+    }
     return await operation();
   } finally {
     release();

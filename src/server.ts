@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import { readFile, appendFile, mkdir, access } from 'node:fs/promises';
+import { readFile, appendFile, mkdir } from 'node:fs/promises';
 import { z } from 'zod';
 import * as contractTools from './tools/contratos.js';
 import * as masterTools from './tools/consulta.js';
@@ -8,6 +8,7 @@ import { OpenAiAdapter } from './llm/openai.js';
 import type { LlmAdapter } from './llm/adapter.js';
 import { loadApiKey } from './secret.js';
 import { outputDirectory } from './paths.js';
+import { withWriteLock } from './storage-lock.js';
 import { isExplicitConfirmation, confirmedChangesError, confirmedReviewError } from './confirmation.js';
 import { timingSafeEqual,hkdfSync,createCipheriv,createDecipheriv,randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -49,8 +50,8 @@ app.get('/api/sessions/:id',(req,res)=>res.json({history:sessions.get(req.params
 app.get('/api/artifacts/:name',async(req,res)=>{
  const files=new Map([['maestro-contratos.csv','sharepoint/maestro-contratos.csv'],['alertas.md','alertas.md']]);
  const relative=files.get(req.params.name); if(!relative){res.status(404).send('Archivo no disponible.');return;}
- const directory=outputDirectory(process.cwd()); const filename=path.join(directory,relative);
- try{await access(filename);res.download(filename,req.params.name,err=>{if(err&&!res.headersSent)res.status(404).send('Archivo no disponible. Vuelve a procesar el buzón.');});}catch{res.status(404).send('Archivo no disponible en esta instancia. Vuelve a procesar el buzón o generar las alertas.');}
+ try{const content=await withWriteLock(process.cwd(),()=>readFile(path.join(outputDirectory(process.cwd()),relative)));res.attachment(req.params.name).send(content);}
+ catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')res.status(404).send('Archivo no disponible. Vuelve a procesar el buzón o generar las alertas.');else res.status(503).send('El almacenamiento no está disponible. Inténtalo de nuevo más tarde.');}
 });
 app.post('/api/chat',async(req,res)=>{
  const schema=z.object({sessionId:z.string().regex(/^[\w-]{1,80}$/),message:z.string().min(1).max(4000),sessionToken:z.string().max(200000).optional()}); const parsed=schema.safeParse(req.body); if(!parsed.success){res.status(400).json({error:'Solicitud inválida'});return;}
@@ -108,7 +109,7 @@ app.post('/api/chat',async(req,res)=>{
    reply='Se alcanzó el límite de pasos de este turno; el proceso puede estar incompleto.\n\n'+(lines.length?'Resultados verificados hasta ahora:\n'+lines.join('\n'):'No se verificaron clasificaciones o registros en este turno.')+'\n\nPide continuar para comprobar los casos y alertas que falten.';needsConfirmation=session.pending.size>0;
   }
   session.history.push({role:'assistant',content:reply,toolCalls,needsConfirmation}); const newSessionToken=process.env.VERCEL?seal(session,apiKey):undefined;res.json({reply,toolCalls,needsConfirmation,usage:session.tokens,sessionToken:newSessionToken});
- }catch(e){ const err=e instanceof Error?e.message:'Error del proveedor'; const logdir=outputDirectory(process.cwd());await mkdir(logdir,{recursive:true}); await appendFile(path.join(logdir,'errors.log'),new Date().toISOString()+' error de proveedor\n'); res.status(502).json({error:'No se pudo consultar el modelo. Comprueba la clave, conexión y disponibilidad. '+(err.includes('timed out')?'Tiempo de espera agotado.':'')}); }
+ }catch(e){ const err=e instanceof Error?e.message:'Error del proveedor'; const logdir=outputDirectory(process.cwd());await mkdir(logdir,{recursive:true}); await appendFile(path.join(logdir,'errors.log'),new Date().toISOString()+' error de proveedor\n'); const partial=toolCalls.length?' Algunas operaciones pudieron completarse; revisa el maestro antes de reintentar.':'';res.status(502).json({error:'No se pudo consultar el modelo. Comprueba la clave, conexión y disponibilidad. '+(err.includes('timed out')?'Tiempo de espera agotado.':'')+partial}); }
 });
 if(!process.env.VERCEL)app.listen(Number(process.env.PORT)||3000,host,()=>console.log(`Servidor iniciado en ${host}:${process.env.PORT||3000}`));
 export default app;
