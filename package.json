@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx --test src/tools/*.test.ts",
+    "test": "tsx --test src/*.test.ts src/tools/*.test.ts",
     "dev": "tsx src/server.ts",
     "demo": "tsx demo.ts",
     "check": "tsc --noEmit"

@@ -1,11 +1,13 @@
 import 'dotenv/config';
 import express from 'express';
-import { readFile, appendFile, mkdir } from 'node:fs/promises';
+import { readFile, appendFile, mkdir, access } from 'node:fs/promises';
 import { z } from 'zod';
 import * as contractTools from './tools/contratos.js';
 import { OpenAiAdapter } from './llm/openai.js';
 import type { LlmAdapter } from './llm/adapter.js';
 import { loadApiKey } from './secret.js';
+import { outputDirectory } from './paths.js';
+import { isExplicitConfirmation, confirmedChangesError } from './confirmation.js';
 import { timingSafeEqual,hkdfSync,createCipheriv,createDecipheriv,randomBytes } from 'node:crypto';
 import path from 'node:path';
 
@@ -38,6 +40,12 @@ const context={directory:process.cwd(),sessionId:''};
 const agentPrompt=await readFile('agent/prompt.md','utf8'); const knowledge=await readFile('src/knowledge/registro-contratos.md','utf8');
 app.get('/api/health',(_req,res)=>res.json({ok:true,provider:'openai',model}));
 app.get('/api/sessions/:id',(req,res)=>res.json({history:sessions.get(req.params.id)?.history??[]}));
+app.get('/api/artifacts/:name',async(req,res)=>{
+ const files=new Map([['maestro-contratos.csv','sharepoint/maestro-contratos.csv'],['alertas.md','alertas.md']]);
+ const relative=files.get(req.params.name); if(!relative){res.status(404).send('Archivo no disponible.');return;}
+ const directory=outputDirectory(process.cwd()); const filename=path.join(directory,relative);
+ try{await access(filename);res.download(filename,req.params.name,err=>{if(err&&!res.headersSent)res.status(404).send('Archivo no disponible. Vuelve a procesar el buzón.');});}catch{res.status(404).send('Archivo no disponible en esta instancia. Vuelve a procesar el buzón o generar las alertas.');}
+});
 app.post('/api/chat',async(req,res)=>{
  const schema=z.object({sessionId:z.string().regex(/^[\w-]{1,80}$/),message:z.string().min(1).max(4000),sessionToken:z.string().max(200000).optional()}); const parsed=schema.safeParse(req.body); if(!parsed.success){res.status(400).json({error:'Solicitud inválida'});return;}
  let apiKey:string|undefined; try { apiKey=loadApiKey(); } catch {res.status(503).json({error:'No se pudo abrir la clave cifrada con este usuario de Windows.'});return;} if(!apiKey){res.status(503).json({error:'Configura una clave de OpenAI en el servidor.'});return;}
@@ -45,7 +53,7 @@ app.post('/api/chat',async(req,res)=>{
  const {sessionId,message,sessionToken}=parsed.data; let restored:Session|undefined; if(process.env.VERCEL && sessionToken){try {restored=unseal(sessionToken,apiKey);}catch{res.status(400).json({error:'La sesión no es válida o ha vencido; inicia otra.'});return;}} const session=restored??sessions.get(sessionId)??{messages:[{role:'system',content:agentPrompt+'\n\n'+knowledge}],tokens:0,originals:{},pending:new Set<string>(),history:[]}; sessions.set(sessionId,session); const pendingBeforeTurn=new Set(session.pending);
  if(session.tokens>=maxSessionTokens){res.status(429).json({error:'Se alcanzó el límite de tokens de esta sesión.'});return;}
  requestCount++; session.messages.push({role:'user',content:message}); session.history.push({role:'user',content:message}); const toolCalls:unknown[]=[]; let reply='Se alcanzó el límite de iteraciones. Continúa en un nuevo turno.'; let needsConfirmation=false; let alertDate:string|undefined; let alertsStale=false;
- const llm:LlmAdapter=new OpenAiAdapter(model,apiKey); const confirms=/^\s*(?:sí[,\s]+)?(?:confirmo|autorizo|apruebo)\b/i.test(message) && !/\bno\s+(?:confirmo|autorizo|apruebo)\b/i.test(message);
+ const llm:LlmAdapter=new OpenAiAdapter(model,apiKey); const confirms=isExplicitConfirmation(message);
  try { for(let i=0;i<maxIterations;i++) {
    const remaining=Math.min(1800,maxSessionTokens-session.tokens,globalBudget-totalTokens); if(remaining<=0){const events=toolCalls as Array<{name:string;args:Record<string,unknown>;result:{ok:boolean;data?:Record<string,unknown>;error?:string}}>;const lines=events.filter(e=>/contratos_(validar|registrar)/.test(e.name)).map(e=>`- ${String(e.args.mensaje_id??'Caso')}: ${e.result.ok?String(e.result.data?.accion??e.result.data?.clasificacion??'consultado'):String(e.result.error??'error')}${Array.isArray(e.result.data?.requiere_revision)&&(e.result.data.requiere_revision as unknown[]).length?` · revisión: ${(e.result.data.requiere_revision as unknown[]).join(', ')}`:''}`);reply='Se alcanzó el límite de uso de la sesión. Estos son los resultados que alcanzaron a verificarse:\n\n'+(lines.join('\n')||'No hay resultados de clasificación todavía.');needsConfirmation=session.pending.size>0;break;}
    const response=await llm.send(session.messages,definitions,remaining); session.tokens+=response.usage; totalTokens+=response.usage; const answer=response.message; session.messages.push(answer as unknown as Message);
@@ -53,12 +61,13 @@ app.post('/api/chat',async(req,res)=>{
    for(const call of answer.tool_calls) {
     const name=call.function.name.replace(/^contratos_/,''); const tool=tools[name]; let args:Record<string,unknown>={}; let result:string;
     try {args=JSON.parse(call.function.arguments) as Record<string,unknown>; if(!tool)throw new Error('Herramienta desconocida'); const id=String(args.mensaje_id??'');
-      if(name==='registrar') {
+      if(name==='validar' || name==='registrar') {
         const proposed=args.contrato as Record<string,{valor:unknown;confianza:number}>; const original=session.originals[id]; if(!original || !proposed)throw new Error('Primero extrae el contrato en esta sesión.');
-        if(Object.keys(proposed).length!==Object.keys(original).length)throw new Error('Se requiere el contrato extraído completo.');
-        for(const [k,v] of Object.entries(proposed)) { const source=original[k]; if(!source)throw new Error('Campo desconocido: '+k); if(JSON.stringify(v)!==JSON.stringify(source)) { if(!confirms || !pendingBeforeTurn.has(id) || v.valor===null || !message.includes(String(v.valor)))throw new Error('Solo se admiten cambios expresos y confirmados por la persona: '+k); } }
-        if(args.confirmado===true && (!confirms || !pendingBeforeTurn.has(id)))throw new Error('Se requiere confirmación humana explícita en un turno posterior.');
-        if(proposed.otrosi?.valor!==true && ['fecha_inicio','fecha_fin'].some(k=>!proposed[k]?.valor))throw new Error('Faltan fechas: pide a la persona los valores antes de registrar.');
+        const confirmationError=confirmedChangesError(message,original,proposed);if(confirmationError)throw new Error(confirmationError);
+        const hasChanges=Object.keys(original).some(k=>JSON.stringify(original[k].valor)!==JSON.stringify(proposed[k].valor));
+        if(hasChanges && (!confirms || !pendingBeforeTurn.has(id) || (name==='registrar' && args.confirmado!==true)))throw new Error('Los cambios requieren confirmación humana explícita en un turno posterior.');
+        if(name==='registrar' && args.confirmado===true && (!confirms || !pendingBeforeTurn.has(id)))throw new Error('Se requiere confirmación humana explícita en un turno posterior.');
+        if(name==='registrar' && proposed.otrosi?.valor!==true && ['fecha_inicio','fecha_fin'].some(k=>!proposed[k]?.valor))throw new Error('Faltan fechas: pide a la persona los valores antes de registrar.');
       }
       result=await tool.execute(args,{...context,sessionId}); const data=JSON.parse(result) as {ok:boolean;data?:Record<string,unknown>};
       if(name==='extraer'&&data.ok&&data.data)session.originals[id]=data.data as Record<string,{valor:unknown;confianza:number}>;
@@ -71,7 +80,7 @@ app.post('/api/chat',async(req,res)=>{
    if(alertsStale && alertDate){session.messages.push({role:'system',content:`El maestro cambió después del reporte de alertas. El reporte anterior está desactualizado. Llama de nuevo a contratos_alertas con hoy=${alertDate} antes de resumir alertas.`});alertsStale=false;}
   }
   session.history.push({role:'assistant',content:reply,toolCalls,needsConfirmation}); const newSessionToken=process.env.VERCEL?seal(session,apiKey):undefined;res.json({reply,toolCalls,needsConfirmation,usage:session.tokens,sessionToken:newSessionToken});
- }catch(e){ const err=e instanceof Error?e.message:'Error del proveedor'; const logdir=process.env.VERCEL?'/tmp/reto-contratos-out':'out';await mkdir(logdir,{recursive:true}); await appendFile(path.join(logdir,'errors.log'),new Date().toISOString()+' error de proveedor\n'); res.status(502).json({error:'No se pudo consultar el modelo. Comprueba la clave, conexión y disponibilidad. '+(err.includes('timed out')?'Tiempo de espera agotado.':'')}); }
+ }catch(e){ const err=e instanceof Error?e.message:'Error del proveedor'; const logdir=outputDirectory(process.cwd());await mkdir(logdir,{recursive:true}); await appendFile(path.join(logdir,'errors.log'),new Date().toISOString()+' error de proveedor\n'); res.status(502).json({error:'No se pudo consultar el modelo. Comprueba la clave, conexión y disponibilidad. '+(err.includes('timed out')?'Tiempo de espera agotado.':'')}); }
 });
 if(!process.env.VERCEL)app.listen(Number(process.env.PORT)||3000,host,()=>console.log(`Servidor iniciado en ${host}:${process.env.PORT||3000}`));
 export default app;
